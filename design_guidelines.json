@@ -1,0 +1,220 @@
+{
+  "project_name": "Consentalk",
+  "theme": "light",
+  "archetype": "Archetype 1: Organic & Earthy (Adapted to Soft Cloud/Minimalist Tech)",
+  "global_vibe": "Calm, emotionally intelligent, minimal, elegant, modern, trustworthy, psychologically safe. Private by design.",
+  "colors": {
+    "brand_primary": "#0EA5E9",
+    "brand_secondary": "#38BDF8",
+    "brand_gradient": "linear-gradient(135deg, #38BDF8 0%, #0EA5E9 100%)",
+    "background": {
+      "default": "#F8FAFC",
+      "paper": "#FFFFFF",
+      "ambient": "#F0F9FF"
+    },
+    "text": {
+      "primary": "#0F172A",
+      "secondary": "#475569",
+      "tertiary": "#94A3B8",
+      "inverse": "#FFFFFF"
+    },
+    "status": {
+      "danger": "#EF4444",
+      "danger_bg": "#FEF2F2",
+      "success": "#10B981",
+      "success_bg": "#ECFDF5"
+    }
+  },
+  "typography": {
+    "font_family": "Plus Jakarta Sans, Outfit, or Manrope",
+    "hierarchy": {
+      "h1": {
+        "size": "32px",
+        "weight": "700",
+        "letter_spacing": "-0.02em",
+        "line_height": "40px"
+      },
+      "h2": {
+        "size": "24px",
+        "weight": "600",
+        "letter_spacing": "-0.01em",
+        "line_height": "32px"
+      },
+      "h3": {
+        "size": "20px",
+        "weight": "600",
+        "line_height": "28px"
+      },
+      "body_lg": {
+        "size": "18px",
+        "weight": "400",
+        "line_height": "28px"
+      },
+      "body": {
+        "size": "16px",
+        "weight": "400",
+        "line_height": "24px"
+      },
+      "caption": {
+        "size": "14px",
+        "weight": "500",
+        "letter_spacing": "0.01em",
+        "line_height": "20px"
+      },
+      "overline": {
+        "size": "12px",
+        "weight": "700",
+        "letter_spacing": "0.1em",
+        "transform": "uppercase"
+      }
+    }
+  },
+  "spacing_and_layout": {
+    "screen_padding": "24px",
+    "component_gap": "16px",
+    "section_gap": "32px",
+    "border_radius": {
+      "sm": "8px",
+      "md": "12px",
+      "lg": "16px",
+      "xl": "24px",
+      "pill": "9999px"
+    },
+    "safe_area_handling": "Always wrap main screen content in SafeAreaView. Apply bottom padding for navigation and keyboard avoiding view for inputs."
+  },
+  "components": {
+    "microphone_orb": {
+      "description": "Central ambient orb acting as the primary interaction point for the Home screen.",
+      "visuals": {
+        "idle": "Size 120x120. Background #F0F9FF. Border 1px solid #E0F2FE. Soft drop shadow (blur 24px, color #0EA5E9, opacity 20%).",
+        "active": "Gradient background (#38BDF8 to #0EA5E9). Shadow intensity increases.",
+        "icon": "Microphone icon inside, colored #0EA5E9 when idle, #FFFFFF when active."
+      },
+      "motion": "Continuous slow breathing animation (scale 1.0 to 1.05 over 3s, loop). On press down, scale shrinks to 0.95."
+    },
+    "buttons": {
+      "primary": {
+        "background": "brand_gradient",
+        "text_color": "#FFFFFF",
+        "border_radius": "pill",
+        "height": "56px",
+        "font": "body_lg (semibold)"
+      },
+      "secondary": {
+        "background": "#F0F9FF",
+        "text_color": "#0EA5E9",
+        "border_radius": "pill",
+        "height": "56px"
+      },
+      "force_exit": {
+        "background": "danger_bg",
+        "text_color": "danger",
+        "border_radius": "pill",
+        "height": "48px",
+        "icon": "exit or x-circle"
+      }
+    },
+    "inputs": {
+      "text_field": {
+        "background": "#FFFFFF",
+        "border": "1px solid #E2E8F0",
+        "border_radius": "xl",
+        "height": "56px",
+        "padding": "0 20px",
+        "focus_state": "Border changes to #38BDF8, adds soft outer glow."
+      },
+      "pin_dots": {
+        "size": "16px",
+        "empty": "bg #E2E8F0",
+        "filled": "bg #0EA5E9",
+        "spacing": "12px"
+      }
+    },
+    "chat_bubbles": {
+      "received": {
+        "background": "#FFFFFF",
+        "border": "1px solid #F1F5F9",
+        "border_radius": "16px 16px 16px 4px",
+        "text_color": "#0F172A",
+        "shadow": "Elevation 1 / very subtle shadow"
+      },
+      "sent": {
+        "background": "#0EA5E9",
+        "border": "none",
+        "border_radius": "16px 16px 4px 16px",
+        "text_color": "#FFFFFF"
+      }
+    }
+  },
+  "screens_blueprint": {
+    "splash_onboarding": {
+      "layout": "Full screen centered logo and Tagline. Use ambient_background_1.",
+      "transitions": "Crossfade on entry, slow translation upwards."
+    },
+    "auth_google": {
+      "layout": "Bottom-heavy layout. Top area clear or showing subtle ambient animation. Bottom sheet container (rounded-t-3xl, bg-white) housing the Google Sign-In button, Trust Badges, and terms.",
+      "visuals": "No aggressive warning text. Use soft checkmarks and 'Encrypted by default' badges."
+    },
+    "home_screen": {
+      "layout": "Minimalist center-stage. Top header has minimal profile/settings icon. Absolute center is the Microphone Orb. Below it, muted text 'Speak your phrase'. Bottom safe area has a subtle 'Type instead' secondary button.",
+      "background": "bg-default with very faint radial gradient in the center behind the orb."
+    },
+    "room_summon": {
+      "layout": "Appears as a glassmorphism overlay (backdrop blur) over the Home screen. PIN entry dots centered. Minimal keyboard."
+    },
+    "create_room": {
+      "layout": "Wizard flow. Step 1: Speak/Type phrase. Step 2: Set PIN. Step 3: Choose Duo/Circle (Card selector). Generous spacing, soft highlight borders on selected cards."
+    },
+    "room_chat": {
+      "header": "Clean white header, minimal border-bottom. Shows Room Type icon (Duo/Circle) and a small disappearing timer icon. Top-right 'Force Exit' button.",
+      "body": "Chat list, inverted scrolling. Generous padding between messages.",
+      "footer": "Input container. Minimal text field, rounded-full. Right side: Voice record button, attachment icon (+). Ephemeral hints ('Messages disappear when you leave')."
+    },
+    "transparency_dashboard": {
+      "layout": "Scrollable View. Stats presented in large soft cards. Large typography for numbers ('0 retained messages'). Calm, reassuring tone. No red text unless an actual risk is detected."
+    },
+    "profile_verification": {
+      "layout": "Form layout. Avatar with verified badge (cyan check). Read-only or highly structured input fields to convey safety."
+    },
+    "super_admin": {
+      "layout": "List-based. Tab navigation for 'Users', 'Reports', 'Admins'. List items have clear typography, right-aligned action dots. Suspended users have a soft red background tint."
+    }
+  },
+  "navigation": {
+    "pattern": "Stack navigation for immersive flows (Chat, Room Summon). Hide bottom tabs in Home to maintain minimalism. Use a drawer or secondary modal for Transparency/Profile from the Home screen."
+  },
+  "motion_and_interactions": {
+    "philosophy": "Fluid, unhurried, reassuring. Nothing snaps. Everything fades or slides gently.",
+    "timings": {
+      "fast": "200ms (buttons press)",
+      "medium": "400ms (screen transitions, modals)",
+      "slow": "3000ms+ (ambient orb breathing)"
+    }
+  },
+  "accessibility": {
+    "color_contrast": "Verify WCAG AA for all text against backgrounds. The #0EA5E9 primary color has sufficient contrast against white for large text, but for body text use #0284C7 or #0F172A.",
+    "touch_targets": "Minimum 48x48 logical pixels for all touchable elements.",
+    "reduced_motion": "Provide fallback for orb breathing animation if reduced motion is enabled."
+  },
+  "testing": {
+    "data_testid_rule": "All interactive and key informational elements MUST include a data-testid attribute in kebab-case format to facilitate robust automated testing. Example: data-testid='google-signin-btn'."
+  },
+  "media_urls": {
+    "logo": {
+      "url": "https://customer-assets.emergentagent.com/job_fed6e79a-f938-419e-84c2-16a2e6e6d63b/artifacts/4tfc8jgv_image.png",
+      "description": "Consentalk Logo - Blue speech bubble + lock + voice waveform",
+      "placement": "Splash screen, Auth header, Settings"
+    },
+    "ambient_background_1": {
+      "url": "https://images.pexels.com/photos/7630418/pexels-photo-7630418.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "description": "Soft abstract bokeh image featuring subtle light patterns.",
+      "placement": "Splash screen background, or heavily blurred as Home screen background base"
+    },
+    "ambient_background_2": {
+      "url": "https://images.pexels.com/photos/12060162/pexels-photo-12060162.png?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "description": "Soft shimmering light effects.",
+      "placement": "Behind the transparency dashboard or settings screens to maintain the serene aesthetic."
+    }
+  },
+  "tech_stack_notes": "Use React Native (Expo Router) with standard JavaScript files (.js). Style with NativeWind or StyleSheet. Avoid .tsx as per user request. No aggressive hacker/spy styles."
+}
