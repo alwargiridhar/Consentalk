@@ -690,13 +690,19 @@ async def create_report(payload: ReportInput, user: User = Depends(get_current_u
         }
     )
     new_score = (target_user.get("risk_score", 0) or 0) + 1
-    new_status = target_user.get("status", "active")
-    if new_score >= 8 and new_status != "blacklisted":
-        new_status = "suspended"
-    elif new_score >= 5 and new_status == "active":
-        new_status = "restricted"
-    elif new_score >= 3 and new_status == "active":
-        new_status = "warned"
+    current_status = target_user.get("status", "active")
+    if current_status == "blacklisted":
+        new_status = "blacklisted"
+    else:
+        # monotonic risk tiers — pick highest tier reached, regardless of current
+        if new_score >= 8:
+            new_status = "suspended"
+        elif new_score >= 5:
+            new_status = "restricted"
+        elif new_score >= 3:
+            new_status = "warned"
+        else:
+            new_status = current_status if current_status != "active" else "active"
     await db.users.update_one(
         {"user_id": target_user["user_id"]},
         {"$set": {"risk_score": new_score, "status": new_status}},
