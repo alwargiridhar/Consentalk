@@ -1,0 +1,50 @@
+{
+  "summary": "Comprehensive backend (35 pytest cases) + frontend smoke tests for Consentalk. 34/35 backend tests passing (97%). Frontend auth screen, FAQ, Home (mic-orb), Profile, Activity, Transparency all render correctly with seeded session token. One real backend bug found in report risk-score escalation.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "POST /api/reports",
+        "issue": "Risk-score escalation never transitions through 'restricted' state. Once user.status becomes 'warned', subsequent reports do NOT escalate to 'restricted' at score>=5 because the elif checks `status == 'active'` (a 'warned' user fails this). User goes warned -> warned -> ... -> suspended at score 8, skipping 'restricted'. Fix: change elifs to compare against the full state machine (e.g., allow upgrading from 'warned' to 'restricted' if score>=5)."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": [
+      {"component": "expo-av", "issue": "Console deprecation warning: expo-av deprecated, will be removed in SDK 54. Migrate to expo-audio / expo-video before SDK upgrade."},
+      {"component": "Image (Logo / asset)", "issue": "Console warning: style.resizeMode is deprecated, use props.resizeMode."},
+      {"component": "View", "issue": "Console warning: props.pointerEvents is deprecated, use style.pointerEvents."}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_consentalk_api.py",
+    "/app/backend/tests/conftest.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Fix /api/reports escalation logic so warned users still escalate to 'restricted' at score>=5 (currently jumps from 'warned' straight to 'suspended' at score 8).",
+    "Migrate expo-av usage to expo-audio (mic recording in /app/frontend/app/(tabs)/index.tsx) before SDK 54 upgrade.",
+    "Replace deprecated style.resizeMode with props.resizeMode on Image components (Logo asset).",
+    "Replace props.pointerEvents with style.pointerEvents on the offending View."
+  ],
+  "critical_code_review_comments": [
+    "Reports escalation state machine only escalates from 'active' for warn/restrict tiers — see backend_issues.minor.",
+    "Forensic 'encryption' is base64 obfuscation only (server.py noted as placeholder for libsodium). Acceptable for MVP but should not be marketed as encrypted forensic without real key management.",
+    "WebSocket auth uses query-string token; fine for now but token is logged in URL. Consider authenticated WS handshake header in production.",
+    "/api/auth/session returns session_token in JSON AND sets httpOnly cookie — the body token is what the web client persists in localStorage, so the httpOnly cookie is largely redundant but harmless.",
+    "server.py is 957 lines — close to 700-line guideline. Consider splitting into routers (auth, rooms, admin, forensic) for maintainability."
+  ],
+  "updated_files": [
+    "/app/backend/tests/conftest.py (created)",
+    "/app/backend/tests/test_consentalk_api.py (created)"
+  ],
+  "success_rate": {"backend": "97% (34/35)", "frontend": "100% (smoke)"},
+  "seed_data_creation": "Created throwaway test users + sessions via pymongo in conftest fixtures (TEST_ prefixed). Also seeded a frontend test session token (fe_test_c14ace3a8f864402) tied to user 'FE Tester' for browser smoke. Test users are cleaned up by fixture teardown; the FE smoke seed user/session remain in DB (low-risk, prefixed with TEST_).",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend tests live in /app/backend/tests/test_consentalk_api.py and use MongoDB-seeded sessions (Bearer tokens). Run: `pytest /app/backend/tests/ -v --junitxml=/app/test_reports/pytest/pytest_results.xml`. The single failing test (test_report_escalation) documents a real bug in /api/reports state-machine — keep failing until backend fix lands. Frontend uses EXPO_PUBLIC_BACKEND_URL (not EXPO_BACKEND_URL); base URL: https://intent-space-1.preview.emergentagent.com. Frontend localStorage key for session: 'consentalk.session_token'.",
+  "rca_of_issue": "Bug: POST /api/reports — user status never reaches 'restricted'. RCA: in server.py escalation block (lines ~692-699), the elif for score>=5 and elif for score>=3 both gate on `new_status == 'active'`. Once status is 'warned' (set at score 3), all subsequent reports fall through every elif (status != active) until score>=8 where the unconditional 'suspended' branch fires. Reproduction: send 8 reports against a fresh active user — observe statuses progress: active(1)->active(2)->warned(3)->warned(4)->warned(5)->warned(6)->warned(7)->suspended(8). 'restricted' is never reached. Mitigation: change escalation to monotonically take max of current and threshold-derived status, e.g., set new_status to highest applicable tier independent of current status (only special-case 'blacklisted' as terminal)."
+}

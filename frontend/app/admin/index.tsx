@@ -1,0 +1,536 @@
+import React, { useCallback, useEffect, useState } from "react";
+import {
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  Pressable,
+  Alert,
+  Image,
+  RefreshControl,
+} from "react-native";
+import { Ionicons } from "@expo/vector-icons";
+import { useRouter, Redirect } from "expo-router";
+import { SafeAreaView } from "react-native-safe-area-context";
+import AmbientBackground from "../../src/components/AmbientBackground";
+import { Colors, Radii } from "../../src/lib/theme";
+import { api } from "../../src/lib/api";
+import { useAuth } from "../../src/contexts/AuthContext";
+
+interface UserRow {
+  user_id: string;
+  email: string;
+  name: string;
+  picture?: string;
+  role: string;
+  status: string;
+  verified: boolean;
+  risk_score: number;
+}
+
+interface Report {
+  report_id: string;
+  reporter_name: string;
+  reported_user_email: string;
+  reported_user_name?: string;
+  reason: string;
+  details?: string;
+  status: string;
+  created_at: string;
+}
+
+interface Fragment {
+  fragment_id: string;
+  room_id: string;
+  preview: string;
+  created_at: string;
+  expires_at: string;
+}
+
+type Tab = "users" | "reports" | "forensic" | "audit";
+
+export default function AdminDashboard() {
+  const { user } = useAuth();
+  const router = useRouter();
+  const [tab, setTab] = useState<Tab>("users");
+  const [users, setUsers] = useState<UserRow[]>([]);
+  const [reports, setReports] = useState<Report[]>([]);
+  const [fragments, setFragments] = useState<Fragment[]>([]);
+  const [audit, setAudit] = useState<any[]>([]);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const isSuper = user?.role === "super_admin";
+
+  const load = useCallback(async () => {
+    try {
+      if (tab === "users") {
+        const r = await api<{ users: UserRow[] }>("/admin/users");
+        setUsers(r.users || []);
+      } else if (tab === "reports") {
+        const r = await api<{ reports: Report[] }>("/admin/reports");
+        setReports(r.reports || []);
+      } else if (tab === "forensic") {
+        const r = await api<{ fragments: Fragment[] }>("/admin/forensic");
+        setFragments(r.fragments || []);
+      } else if (tab === "audit") {
+        const r = await api<{ actions: any[] }>("/admin/audit");
+        setAudit(r.actions || []);
+      }
+    } catch (e: any) {
+      Alert.alert("Couldn't load", e?.message || "Try again");
+    }
+  }, [tab]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await load();
+    setRefreshing(false);
+  };
+
+  if (!user) return <Redirect href="/auth" />;
+  if (user.role !== "admin" && user.role !== "super_admin") {
+    return <Redirect href="/(tabs)" />;
+  }
+
+  const action = (target_user_id: string, act: string, label: string) => {
+    Alert.alert(label, "Apply this action?", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Apply",
+        onPress: async () => {
+          try {
+            await api("/admin/users/action", {
+              body: { target_user_id, action: act },
+            });
+            await load();
+          } catch (e: any) {
+            Alert.alert("Failed", e?.message || "Try again");
+          }
+        },
+      },
+    ]);
+  };
+
+  const role = (target_user_id: string, newRole: string) => {
+    Alert.alert("Change role", `Set role to ${newRole}?`, [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Apply",
+        onPress: async () => {
+          try {
+            await api("/admin/users/role", {
+              body: { target_user_id, role: newRole },
+            });
+            await load();
+          } catch (e: any) {
+            Alert.alert("Failed", e?.message || "Try again");
+          }
+        },
+      },
+    ]);
+  };
+
+  return (
+    <AmbientBackground>
+      <SafeAreaView style={{ flex: 1 }} edges={["top"]}>
+        <View style={styles.header}>
+          <Pressable onPress={() => router.back()} style={styles.backBtn}>
+            <Ionicons name="chevron-back" size={20} color={Colors.textSecondary} />
+          </Pressable>
+          <View style={{ flex: 1, alignItems: "center" }}>
+            <Text style={styles.title}>
+              {isSuper ? "Super-Admin Console" : "Moderation Console"}
+            </Text>
+            <Text style={styles.subtitle}>
+              {isSuper
+                ? "All rights reserved by Giridhar Alwar — © GA"
+                : "Targeted, consent-first moderation"}
+            </Text>
+          </View>
+          <View style={{ width: 36 }} />
+        </View>
+
+        <View style={styles.tabsRow}>
+          <TabBtn label="Users" active={tab === "users"} onPress={() => setTab("users")} />
+          <TabBtn label="Reports" active={tab === "reports"} onPress={() => setTab("reports")} />
+          {isSuper ? (
+            <TabBtn
+              label="Forensic"
+              active={tab === "forensic"}
+              onPress={() => setTab("forensic")}
+            />
+          ) : null}
+          <TabBtn label="Audit" active={tab === "audit"} onPress={() => setTab("audit")} />
+        </View>
+
+        <ScrollView
+          contentContainerStyle={styles.scroll}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={Colors.brandPrimary}
+            />
+          }
+        >
+          {tab === "users" &&
+            users.map((u) => (
+              <View key={u.user_id} style={styles.card} testID={`user-${u.user_id}`}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                  {u.picture ? (
+                    <Image source={{ uri: u.picture }} style={styles.avatar} />
+                  ) : (
+                    <View style={[styles.avatar, styles.avatarFallback]}>
+                      <Ionicons name="person-outline" size={16} color="#FFFFFF" />
+                    </View>
+                  )}
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.userName} numberOfLines={1}>
+                      {u.name}{" "}
+                      {u.verified ? (
+                        <Ionicons
+                          name="checkmark-circle"
+                          size={13}
+                          color={Colors.success}
+                        />
+                      ) : null}
+                    </Text>
+                    <Text style={styles.userEmail} numberOfLines={1}>
+                      {u.email}
+                    </Text>
+                  </View>
+                  <RoleBadge role={u.role} />
+                </View>
+                <View style={styles.metaRow}>
+                  <MetaPill label={u.status.toUpperCase()} status={u.status} />
+                  <MetaPill label={`RISK ${u.risk_score}`} status="info" />
+                </View>
+                <View style={styles.actBar}>
+                  <ActBtn
+                    icon="notifications-outline"
+                    label="Warn"
+                    onPress={() => action(u.user_id, "warn", "Warn user")}
+                  />
+                  <ActBtn
+                    icon="lock-closed-outline"
+                    label="Restrict"
+                    onPress={() => action(u.user_id, "restrict", "Restrict user")}
+                  />
+                  <ActBtn
+                    icon="pause-circle-outline"
+                    label="Suspend"
+                    onPress={() => action(u.user_id, "suspend", "Suspend user")}
+                  />
+                  {isSuper ? (
+                    <ActBtn
+                      icon="ban-outline"
+                      label="Blacklist"
+                      tone="danger"
+                      onPress={() => action(u.user_id, "blacklist", "Blacklist user")}
+                    />
+                  ) : null}
+                  <ActBtn
+                    icon="refresh-outline"
+                    label="Reactivate"
+                    tone="success"
+                    onPress={() => action(u.user_id, "reactivate", "Reactivate user")}
+                  />
+                </View>
+                {isSuper ? (
+                  <View style={styles.roleBar}>
+                    <Pressable
+                      onPress={() => role(u.user_id, "user")}
+                      style={styles.rolePill}
+                    >
+                      <Text style={styles.rolePillText}>Make User</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => role(u.user_id, "admin")}
+                      style={styles.rolePill}
+                    >
+                      <Text style={styles.rolePillText}>Make Admin</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => role(u.user_id, "super_admin")}
+                      style={[styles.rolePill, { backgroundColor: Colors.brandFog }]}
+                    >
+                      <Text
+                        style={[
+                          styles.rolePillText,
+                          { color: Colors.brandDeep, fontWeight: "700" },
+                        ]}
+                      >
+                        Make Super
+                      </Text>
+                    </Pressable>
+                  </View>
+                ) : null}
+              </View>
+            ))}
+
+          {tab === "reports" &&
+            reports.map((r) => (
+              <View key={r.report_id} style={styles.card} testID={`report-${r.report_id}`}>
+                <Text style={styles.reportReason}>{r.reason}</Text>
+                <Text style={styles.reportText}>
+                  Reported user: {r.reported_user_name || r.reported_user_email}
+                </Text>
+                <Text style={styles.reportText}>By: {r.reporter_name}</Text>
+                {r.details ? (
+                  <Text style={styles.reportDetails}>"{r.details}"</Text>
+                ) : null}
+                <Text style={styles.reportTime}>
+                  {new Date(r.created_at).toLocaleString()}
+                </Text>
+              </View>
+            ))}
+
+          {tab === "forensic" && isSuper &&
+            fragments.map((f) => (
+              <View key={f.fragment_id} style={styles.card}>
+                <Text style={styles.userEmail}>Room {f.room_id}</Text>
+                <Text style={styles.reportText}>{f.preview}</Text>
+                <Text style={styles.reportTime}>
+                  Created {new Date(f.created_at).toLocaleString()} • Expires{" "}
+                  {new Date(f.expires_at).toLocaleDateString()}
+                </Text>
+              </View>
+            ))}
+
+          {tab === "audit" &&
+            audit.map((a) => (
+              <View key={a.action_id} style={styles.card}>
+                <Text style={styles.userName}>{a.action}</Text>
+                <Text style={styles.reportText}>
+                  By {a.admin_name || a.admin_user_id} → {a.target_user_id}
+                </Text>
+                {a.reason ? (
+                  <Text style={styles.reportDetails}>"{a.reason}"</Text>
+                ) : null}
+                <Text style={styles.reportTime}>
+                  {a.created_at ? new Date(a.created_at).toLocaleString() : ""}
+                </Text>
+              </View>
+            ))}
+
+          {(tab === "users" && users.length === 0) ||
+          (tab === "reports" && reports.length === 0) ||
+          (tab === "forensic" && fragments.length === 0) ||
+          (tab === "audit" && audit.length === 0) ? (
+            <View style={styles.empty}>
+              <Ionicons name="leaf-outline" size={28} color={Colors.brandPrimary} />
+              <Text style={styles.emptyText}>Nothing to review here.</Text>
+            </View>
+          ) : null}
+        </ScrollView>
+      </SafeAreaView>
+    </AmbientBackground>
+  );
+}
+
+function TabBtn({
+  label,
+  active,
+  onPress,
+}: {
+  label: string;
+  active: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      testID={`admin-tab-${label.toLowerCase()}`}
+      style={[styles.tabBtn, active && styles.tabBtnActive]}
+    >
+      <Text style={[styles.tabBtnText, active && styles.tabBtnTextActive]}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
+function RoleBadge({ role }: { role: string }) {
+  let color = Colors.textSecondary;
+  let bg = Colors.divider2;
+  if (role === "super_admin") {
+    color = Colors.brandDeep;
+    bg = Colors.brandFog;
+  } else if (role === "admin") {
+    color = Colors.success;
+    bg = Colors.successBg;
+  }
+  return (
+    <View style={[styles.roleBadge, { backgroundColor: bg }]}>
+      <Text style={[styles.roleBadgeText, { color }]}>
+        {role.replace("_", " ").toUpperCase()}
+      </Text>
+    </View>
+  );
+}
+
+function MetaPill({ label, status }: { label: string; status: string }) {
+  let color = Colors.textSecondary;
+  let bg = Colors.divider2;
+  if (status === "active") {
+    color = Colors.success;
+    bg = Colors.successBg;
+  }
+  if (status === "warned" || status === "restricted") {
+    color = Colors.warn;
+    bg = Colors.warnBg;
+  }
+  if (status === "suspended" || status === "blacklisted") {
+    color = Colors.danger;
+    bg = Colors.dangerBg;
+  }
+  return (
+    <View style={[styles.pill, { backgroundColor: bg }]}>
+      <Text style={[styles.pillText, { color }]}>{label}</Text>
+    </View>
+  );
+}
+
+function ActBtn({
+  icon,
+  label,
+  onPress,
+  tone,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  label: string;
+  onPress: () => void;
+  tone?: "danger" | "success" | "default";
+}) {
+  let color = Colors.textSecondary;
+  let bg = Colors.bg;
+  if (tone === "danger") {
+    color = Colors.danger;
+    bg = Colors.dangerBg;
+  }
+  if (tone === "success") {
+    color = Colors.success;
+    bg = Colors.successBg;
+  }
+  return (
+    <Pressable
+      onPress={onPress}
+      testID={`admin-action-${label.toLowerCase()}`}
+      style={[styles.actBtn, { backgroundColor: bg }]}
+    >
+      <Ionicons name={icon} size={14} color={color} />
+      <Text style={[styles.actBtnText, { color }]}>{label}</Text>
+    </Pressable>
+  );
+}
+
+const styles = StyleSheet.create({
+  header: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    gap: 8,
+  },
+  backBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 36,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: Colors.paper,
+    borderWidth: 1,
+    borderColor: Colors.divider2,
+  },
+  title: { fontSize: 17, fontWeight: "700", color: Colors.textPrimary },
+  subtitle: { fontSize: 11, color: Colors.textTertiary, marginTop: 2 },
+  tabsRow: {
+    flexDirection: "row",
+    paddingHorizontal: 16,
+    gap: 8,
+    paddingBottom: 8,
+  },
+  tabBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: Radii.pill,
+    backgroundColor: Colors.paper,
+    borderWidth: 1,
+    borderColor: Colors.divider2,
+  },
+  tabBtnActive: { backgroundColor: Colors.brandFog, borderColor: "#7DD3FC" },
+  tabBtnText: { color: Colors.textSecondary, fontSize: 13, fontWeight: "600" },
+  tabBtnTextActive: { color: Colors.brandDeep, fontWeight: "700" },
+  scroll: { padding: 16, paddingBottom: 80, gap: 12 },
+  card: {
+    backgroundColor: Colors.paper,
+    borderRadius: Radii.xl,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: Colors.divider2,
+    gap: 8,
+  },
+  avatar: { width: 38, height: 38, borderRadius: 38, backgroundColor: Colors.divider2 },
+  avatarFallback: {
+    backgroundColor: Colors.brandPrimary,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  userName: { fontSize: 14, fontWeight: "700", color: Colors.textPrimary },
+  userEmail: { fontSize: 12, color: Colors.textSecondary, marginTop: 2 },
+  roleBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: Radii.pill,
+  },
+  roleBadgeText: { fontSize: 9, fontWeight: "800", letterSpacing: 0.6 },
+  metaRow: { flexDirection: "row", gap: 6, marginTop: 4 },
+  pill: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: Radii.pill,
+  },
+  pillText: { fontSize: 9, fontWeight: "700", letterSpacing: 0.6 },
+  actBar: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 6 },
+  actBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: Radii.pill,
+  },
+  actBtnText: { fontSize: 11, fontWeight: "600" },
+  roleBar: { flexDirection: "row", gap: 6, marginTop: 4 },
+  rolePill: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: Radii.pill,
+    backgroundColor: Colors.bg,
+    borderWidth: 1,
+    borderColor: Colors.divider2,
+  },
+  rolePillText: { fontSize: 11, color: Colors.textSecondary },
+  reportReason: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: Colors.danger,
+    letterSpacing: 0.4,
+  },
+  reportText: { fontSize: 13, color: Colors.textPrimary },
+  reportDetails: {
+    fontSize: 13,
+    color: Colors.textSecondary,
+    fontStyle: "italic",
+    backgroundColor: Colors.bg,
+    padding: 8,
+    borderRadius: 8,
+  },
+  reportTime: { fontSize: 11, color: Colors.textTertiary, marginTop: 4 },
+  empty: { alignItems: "center", paddingVertical: 60, gap: 10 },
+  emptyText: { color: Colors.textSecondary, fontSize: 14 },
+});

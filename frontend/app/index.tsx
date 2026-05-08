@@ -1,30 +1,60 @@
-import { Text, View, StyleSheet, Image } from "react-native";
-
-const EXPO_PUBLIC_BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
+import React, { useEffect } from "react";
+import { View, Text, ActivityIndicator, StyleSheet } from "react-native";
+import { useRouter } from "expo-router";
+import { useAuth } from "../src/contexts/AuthContext";
+import AmbientBackground from "../src/components/AmbientBackground";
+import Logo from "../src/components/Logo";
+import { Colors } from "../src/lib/theme";
 
 export default function Index() {
-  console.log(EXPO_PUBLIC_BACKEND_URL, "EXPO_PUBLIC_BACKEND_URL");
+  const router = useRouter();
+  const { user, loading } = useAuth();
+
+  useEffect(() => {
+    if (loading) return;
+    if (user) {
+      router.replace("/(tabs)");
+    } else {
+      router.replace("/auth");
+    }
+  }, [user, loading, router]);
 
   return (
-    <View style={styles.container}>
-      <Image
-        source={require("../assets/images/app-image.png")}
-        style={styles.image}
-      />
-    </View>
+    <AmbientBackground>
+      <View style={styles.center}>
+        <Logo size={96} />
+        <Text style={styles.brand}>Consentalk</Text>
+        <Text style={styles.tag}>— Private by Presence —</Text>
+        <ActivityIndicator
+          color={Colors.brandPrimary}
+          style={{ marginTop: 32 }}
+          testID="splash-loader"
+        />
+      </View>
+    </AmbientBackground>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  center: {
     flex: 1,
-    backgroundColor: "#0c0c0c",
     alignItems: "center",
     justifyContent: "center",
+    paddingHorizontal: 24,
   },
-  image: {
-    width: "100%",
-    height: "100%",
-    resizeMode: "contain",
+  brand: {
+    marginTop: 16,
+    fontSize: 32,
+    fontWeight: "700",
+    color: Colors.textPrimary,
+    letterSpacing: -0.6,
+  },
+  tag: {
+    marginTop: 4,
+    fontSize: 12,
+    letterSpacing: 2,
+    color: Colors.brandPrimary,
+    textTransform: "uppercase",
+    fontWeight: "600",
   },
 });
