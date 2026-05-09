@@ -25,6 +25,7 @@ import { Colors, Radii } from "../../src/lib/theme";
 import { api, backendUrl, getStoredToken } from "../../src/lib/api";
 import { useAuth } from "../../src/contexts/AuthContext";
 import { startWebRecorder, blobFilename, WebRecorder } from "../../src/lib/webRecorder";
+import { confirmDialog, notifyDialog } from "../../src/lib/confirm";
 
 type Step = "idle" | "phrase" | "pin" | "summoning" | "results";
 
@@ -223,29 +224,23 @@ export default function HomeScreen() {
     }
   };
 
-  const leaveOrEnd = (room: RoomCard) => {
+  const leaveOrEnd = async (room: RoomCard) => {
     const isOwner = room.owner_user_id === user?.user_id;
-    Alert.alert(
-      isOwner ? "End & delete this room?" : "Leave this room?",
-      isOwner
+    const ok = await confirmDialog({
+      title: isOwner ? "End & delete this room?" : "Leave this room?",
+      message: isOwner
         ? "Messages will be wiped and the room will close for everyone."
         : "You will no longer see this room when you summon.",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: isOwner ? "End room" : "Leave",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              await api(`/rooms/${room.room_id}/leave`, { method: "POST" });
-              setResults((prev) => prev.filter((r) => r.room_id !== room.room_id));
-            } catch (e: any) {
-              Alert.alert("Couldn't perform", e?.message || "Try again");
-            }
-          },
-        },
-      ]
-    );
+      confirmLabel: isOwner ? "End room" : "Leave",
+      destructive: true,
+    });
+    if (!ok) return;
+    try {
+      await api(`/rooms/${room.room_id}/leave`, { method: "POST" });
+      setResults((prev) => prev.filter((r) => r.room_id !== room.room_id));
+    } catch (e: any) {
+      notifyDialog("Couldn't perform", e?.message || "Try again");
+    }
   };
 
   const pinKeys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "", "0", "back"];

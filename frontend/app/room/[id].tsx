@@ -19,10 +19,12 @@ import { Audio } from "expo-av";
 import * as ImagePicker from "expo-image-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { LinearGradient } from "expo-linear-gradient";
 import AmbientBackground from "../../src/components/AmbientBackground";
 import { Colors, Radii } from "../../src/lib/theme";
 import { api, getStoredToken, wsUrl } from "../../src/lib/api";
 import { useAuth } from "../../src/contexts/AuthContext";
+import { confirmDialog, notifyDialog, getInitials, gradientFor } from "../../src/lib/confirm";
 
 interface Member {
   user_id: string;
@@ -301,31 +303,26 @@ export default function RoomChat() {
     await send({ content_type: "image", content: dataUri });
   };
 
-  const endConversation = () => {
-    Alert.alert(
-      "End conversation?",
-      "All messages in this room will be wiped immediately. The room will close for everyone.",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "End now",
-          style: "destructive",
-          onPress: async () => {
-            setEndBusy(true);
-            try {
-              await api(`/rooms/${id}/end`, { method: "POST" });
-              setMessages([]);
-              setEndedNotice("You ended the conversation. Messages wiped.");
-              setTimeout(() => router.replace("/(tabs)"), 800);
-            } catch (e: any) {
-              Alert.alert("Couldn't end", e?.message || "Try again");
-            } finally {
-              setEndBusy(false);
-            }
-          },
-        },
-      ]
-    );
+  const endConversation = async () => {
+    const ok = await confirmDialog({
+      title: "End conversation?",
+      message:
+        "All messages in this room will be wiped immediately. The room will close for everyone.",
+      confirmLabel: "End now",
+      destructive: true,
+    });
+    if (!ok) return;
+    setEndBusy(true);
+    try {
+      await api(`/rooms/${id}/end`, { method: "POST" });
+      setMessages([]);
+      setEndedNotice("You ended the conversation. Messages wiped.");
+      setTimeout(() => router.replace("/(tabs)"), 800);
+    } catch (e: any) {
+      notifyDialog("Couldn't end", e?.message || "Try again");
+    } finally {
+      setEndBusy(false);
+    }
   };
 
   const sendInvite = async () => {
@@ -410,6 +407,7 @@ export default function RoomChat() {
               testID="room-back"
               style={styles.iconBtn}
               onPress={() => router.back()}
+              accessibilityLabel="Back"
             >
               <Ionicons name="chevron-back" size={20} color={Colors.textSecondary} />
             </Pressable>
@@ -422,39 +420,57 @@ export default function RoomChat() {
                 MEMBERS • EPHEMERAL
               </Text>
             </View>
-            <View style={{ flexDirection: "row", gap: 6 }}>
-              <Pressable
-                testID="screenshot-btn"
-                style={styles.iconBtn}
-                onPress={requestScreenshot}
-              >
-                <Ionicons
-                  name="camera-outline"
-                  size={18}
-                  color={Colors.textSecondary}
-                />
-              </Pressable>
-              {isOwner ? (
+            <View style={{ flexDirection: "row", gap: 8 }}>
+              <View style={{ alignItems: "center" }}>
                 <Pressable
-                  testID="invite-btn"
+                  testID="screenshot-btn"
                   style={styles.iconBtn}
-                  onPress={() => setShowInvite(true)}
+                  onPress={requestScreenshot}
+                  accessibilityLabel="Request screenshot consent"
+                  // @ts-ignore web title attribute
+                  title="Ask others to allow a screenshot"
                 >
                   <Ionicons
-                    name="person-add-outline"
+                    name="camera-outline"
                     size={18}
-                    color={Colors.brandPrimary}
+                    color={Colors.textSecondary}
                   />
                 </Pressable>
+                <Text style={styles.iconLabel}>Snap</Text>
+              </View>
+              {isOwner ? (
+                <View style={{ alignItems: "center" }}>
+                  <Pressable
+                    testID="invite-btn"
+                    style={styles.iconBtn}
+                    onPress={() => setShowInvite(true)}
+                    accessibilityLabel="Invite a member"
+                    // @ts-ignore web title attribute
+                    title="Invite a member by email or phone"
+                  >
+                    <Ionicons
+                      name="person-add-outline"
+                      size={18}
+                      color={Colors.brandPrimary}
+                    />
+                  </Pressable>
+                  <Text style={styles.iconLabel}>Invite</Text>
+                </View>
               ) : null}
-              <Pressable
-                testID="force-exit-btn"
-                style={[styles.iconBtn, styles.dangerBtn]}
-                onPress={endConversation}
-                disabled={endBusy}
-              >
-                <Ionicons name="exit-outline" size={18} color={Colors.danger} />
-              </Pressable>
+              <View style={{ alignItems: "center" }}>
+                <Pressable
+                  testID="force-exit-btn"
+                  style={[styles.iconBtn, styles.dangerBtn]}
+                  onPress={endConversation}
+                  disabled={endBusy}
+                  accessibilityLabel="End conversation"
+                  // @ts-ignore web title attribute
+                  title="End conversation — wipes messages for everyone"
+                >
+                  <Ionicons name="exit-outline" size={18} color={Colors.danger} />
+                </Pressable>
+                <Text style={[styles.iconLabel, { color: Colors.danger }]}>End</Text>
+              </View>
             </View>
           </View>
 
@@ -511,18 +527,13 @@ export default function RoomChat() {
                       style={styles.avatarSm}
                       testID={`avatar-${m.sender_user_id}`}
                     >
-                      {m.sender_picture ? (
-                        <Image
-                          source={{ uri: m.sender_picture }}
-                          style={{ width: 28, height: 28, borderRadius: 28 }}
-                        />
-                      ) : (
-                        <Ionicons
-                          name="person-outline"
-                          size={14}
-                          color={Colors.textSecondary}
-                        />
-                      )}
+                      <LinearGradient
+                        colors={gradientFor(m.sender_user_id)}
+                        style={[StyleSheet.absoluteFillObject, { borderRadius: 28 }]}
+                      />
+                      <Text style={styles.avatarSmInitials}>
+                        {getInitials(m.sender_name)}
+                      </Text>
                     </Pressable>
                   )}
                   <View
@@ -533,7 +544,9 @@ export default function RoomChat() {
                   >
                     {!me && (
                       <Pressable onPress={() => openMember(m.sender_user_id)}>
-                        <Text style={styles.bubbleSender}>{m.sender_name}</Text>
+                        <Text style={styles.bubbleSender}>
+                          {getInitials(m.sender_name)}
+                        </Text>
                       </Pressable>
                     )}
                     {m.content_type === "text" ? (
@@ -750,22 +763,20 @@ export default function RoomChat() {
               <View style={{ alignItems: "center" }}>
                 {memberLoading ? (
                   <ActivityIndicator color={Colors.brandPrimary} />
-                ) : memberInfo?.picture ? (
-                  <Image
-                    source={{ uri: memberInfo.picture }}
-                    style={styles.memberPic}
-                  />
                 ) : (
                   <View style={[styles.memberPic, styles.memberPicFallback]}>
-                    <Ionicons
-                      name="person-outline"
-                      size={32}
-                      color="#FFFFFF"
+                    <LinearGradient
+                      colors={gradientFor(memberInfo?.user_id || "?")}
+                      style={[StyleSheet.absoluteFillObject, { borderRadius: 88 }]}
                     />
+                    <Text style={styles.memberInitials}>
+                      {getInitials(memberInfo?.name)}
+                    </Text>
                   </View>
                 )}
                 <Text style={styles.memberName} testID="member-name">
-                  {memberInfo?.name || "…"}
+                  {getInitials(memberInfo?.name)}{" "}
+                  <Text style={styles.memberHandle}>· member</Text>
                 </Text>
                 <View style={styles.memberMetaRow}>
                   {memberInfo?.verified ? (
@@ -903,6 +914,14 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: Colors.divider2,
   },
+  iconLabel: {
+    fontSize: 9,
+    fontWeight: "700",
+    color: Colors.textSecondary,
+    letterSpacing: 0.6,
+    marginTop: 4,
+    textTransform: "uppercase",
+  },
   dangerBtn: { borderColor: "#FECACA", backgroundColor: Colors.dangerBg },
   title: { fontSize: 16, fontWeight: "700", color: Colors.textPrimary },
   subtitle: {
@@ -964,6 +983,13 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.brandFog,
     alignItems: "center",
     justifyContent: "center",
+    overflow: "hidden",
+  },
+  avatarSmInitials: {
+    color: "#FFFFFF",
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 0.5,
   },
   bubble: {
     maxWidth: "78%",
@@ -1112,12 +1138,19 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     marginBottom: 6,
   },
-  memberPic: { width: 88, height: 88, borderRadius: 88, backgroundColor: Colors.divider2 },
+  memberPic: { width: 88, height: 88, borderRadius: 88, backgroundColor: Colors.divider2, overflow: "hidden", alignItems: "center", justifyContent: "center" },
   memberPicFallback: {
     backgroundColor: Colors.brandPrimary,
     alignItems: "center",
     justifyContent: "center",
   },
+  memberInitials: {
+    color: "#FFFFFF",
+    fontSize: 34,
+    fontWeight: "800",
+    letterSpacing: 1,
+  },
+  memberHandle: { fontWeight: "400", fontSize: 13, color: Colors.textTertiary },
   memberName: { fontSize: 20, fontWeight: "700", color: Colors.textPrimary, marginTop: 12 },
   memberMetaRow: { flexDirection: "row", gap: 8, marginTop: 10, flexWrap: "wrap", justifyContent: "center" },
   memberPill: {

@@ -33,6 +33,11 @@ def _make_user(mongo, email, name="Test User", role="user", status="active", ver
         "status": status,
         "created_at": datetime.now(timezone.utc),
         "last_active": datetime.now(timezone.utc),
+        # Test users are granted premium so free-tier daily quota does not
+        # interfere with tests that create multiple rooms.
+        "is_premium": True,
+        "premium_until": datetime.now(timezone.utc) + timedelta(days=7),
+        "premium_plan": "test_grant",
     })
     mongo.user_sessions.insert_one({
         "user_id": user_id,

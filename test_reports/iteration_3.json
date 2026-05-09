@@ -1,0 +1,66 @@
+{
+  "summary": "Iteration 3 backend + frontend verification for Consentalk. 80/80 backend pytest cases pass (54 pre-existing + 26 NEW for billing plans, billing/me, subscribe (mocked), cancel, free-tier room cap (1/day -> 402), free-tier image cap (3/session -> 402), admin/billing grant+revoke (super-admin and permission-gated admin), billing users/events listing, RBAC permissions catalog (16+), roles CRUD with invalid-perm filter, assign/revoke role with permission union+rebuild, admin analytics summary with permission gating). Frontend smoke: /premium region toggle (INR/USD), 4 plan cards across regions, admin-unlimited banner; /(tabs)/profile shows initials avatar (profile-name='SA \u00b7 you') + menu-premium + menu-admin; /admin shows all 7 horizontally-scrollable tabs (users, reports, billing, roles, analytics, forensic, audit). NOTE: while admin tab buttons render and visually highlight when clicked, the tab BODY did not update to show billing-search/metric-*/role-name-input on the smoke session \u2014 likely a state-render bug. Also fixed a P0 frontend syntax error in app/admin/index.tsx that was breaking ALL routes.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "app/admin/index.tsx",
+        "issue": "Orphan duplicate StyleSheet fragment at end of file (lines 961-969 with `tyle: \"italic\"`) caused Metro SyntaxError 'Missing semicolon. (962:19)' which broke the WHOLE Expo web bundle (every route returned 500). Removed the dead block. After fix Metro bundles cleanly. This is a P0 blocker that would crash the deployed web build.",
+        "testID": "n/a",
+        "priority": "CRITICAL (already fixed by tester)"
+      },
+      {
+        "component": "app/admin/index.tsx (tab-switching)",
+        "issue": "All 7 admin tab buttons render with correct testIDs and the active border updates on click, but the tab BODY content does not switch \u2014 after clicking admin-tab-billing the admin-billing-search input is not visible, after admin-tab-analytics no metric-* cells appear, after admin-tab-roles role-name-input is missing. The body keeps showing the empty-state ('Nothing to review here.'). Either the active-tab state is not driving the rendered section or the per-tab content is mounted off-screen/clipped. Needs main-agent investigation \u2014 likely a React state vs render-condition issue in the admin screen.",
+        "testID": "admin-tab-billing / admin-tab-roles / admin-tab-analytics",
+        "priority": "HIGH"
+      }
+    ],
+    "integration_issues": [
+      {
+        "flow": "Direct navigation to /admin without first hydrating session",
+        "issue": "Hitting https://<host>/admin directly (with localStorage session_token already set by add_init_script) redirects to /auth because the admin route guard runs synchronously before AuthContext loads the token from storage. Workaround: navigate to /(tabs)/profile first then click menu-admin. Consider showing a loading state in admin index while AuthContext is still hydrating instead of immediate redirect.",
+        "affected_testIDs": ["menu-admin"]
+      }
+    ],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_consentalk_api.py",
+    "/app/backend/tests/test_iteration2_features.py",
+    "/app/backend/tests/test_iteration3_features.py (NEW)",
+    "/app/backend/tests/conftest.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Investigate admin dashboard tab-switching: clicking admin-tab-billing/roles/analytics highlights the tab but does not swap the body \u2014 verify the active-tab state variable in app/admin/index.tsx is wired into the renderTabContent switch / conditional. Per-tab testIDs (admin-billing-search, role-name-input, metric-*) need to be reachable from the rendered DOM.",
+    "Decide whether direct /admin URL should wait for AuthContext hydration instead of redirecting to /auth on initial render (fix race for super-admin deep links).",
+    "(Tracking only) server.py is now 1742 lines \u2014 split into routers/ before next iteration; same recommendation as iteration 2.",
+    "(Tracking only) /api/billing/subscribe is MOCKED \u2014 replace with Razorpay/Stripe before launch (already documented)."
+  ],
+  "critical_code_review_comments": [
+    "P0: app/admin/index.tsx had a stray syntax-broken trailing block (`tyle: \"italic\"` outside any object). This typo broke Metro for ALL routes \u2014 future code-review should run `tsc --noEmit` or eslint before commit.",
+    "Server.py keeps growing (1742 lines now); billing + RBAC + analytics blocks are clean but should land in routers/billing.py / routers/rbac.py / routers/admin.py.",
+    "_is_premium_active treats every admin/super-admin as premium \u2014 correct for quota bypass, but billing_me returns is_premium=true even for an admin who never subscribed; UI must use is_admin_unlimited (it does in /premium banner). OK but subtle.",
+    "billing.subscribe extends from existing premium_until if still in future \u2014 good. cancel only writes an event, does NOT clear is_premium until premium_until passes \u2014 acceptable but document this behavior.",
+    "RBAC revoke-role rebuilds permissions purely from remaining custom roles \u2014 this would drop any direct admin-set permissions like the test's manually-injected 'billing.grant'. If direct grants are intended to coexist with role grants, store them separately or reapply them on rebuild.",
+    "Admin billing/grant always overwrites premium_plan to the granted plan even if a longer plan was already active \u2014 minor UX nit."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration3_features.py (created, 26 tests)",
+    "/app/frontend/app/admin/index.tsx (removed orphan trailing StyleSheet typo block lines 961-969 to fix Metro SyntaxError)"
+  ],
+  "success_rate": {
+    "backend": "100% (80/80 \u2014 54 existing + 26 new iteration-3)",
+    "frontend": "Premium screen 100%, Profile screen 100%, Admin tabs render 100% but tab-body switching has a visible bug (see ui_bugs)."
+  },
+  "seed_data_creation": "All backend tests use TEST_-prefixed transient users created+cleaned by fixtures and helpers. For the frontend smoke I upserted the canonical super-admin user (email='alwargiridhar@gmail.com', role='super_admin') and inserted a session token: SUPER_TOKEN=fe_super_tok_1778302172861 (valid 7d). Safe to leave; reusable by next testing agent. No production data touched.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run: `pytest /app/backend/tests/ -v -o asyncio_mode=auto --junitxml=/app/test_reports/pytest/pytest_results.xml`. New file: test_iteration3_features.py covers TestBillingPlans, TestBillingMe, TestBillingSubscribe, TestFreeTierRoomCap, TestFreeTierImageCap, TestAdminBilling, TestRBAC, TestAnalytics. The conftest fixtures auto-mark test users as premium so you cannot use them for free-tier 402 paths \u2014 use the local helper `_mint_free_user(mongo)` (already in test_iteration3_features.py) which inserts is_premium=False. For frontend, set localStorage 'consentalk.session_token'=<token>, navigate to /(tabs)/profile FIRST (so AuthContext hydrates) THEN click menu-admin to enter /admin \u2014 direct /admin URL hits an auth-redirect race. Premium and profile testIDs already verified: region-INR/region-USD, plan-monthly_inr/yearly_inr/monthly_usd/yearly_usd, admin-unlimited-banner, profile-name (initials format 'XX \u00b7 you'), menu-premium, menu-admin. Admin tabs admin-tab-{users,reports,billing,roles,analytics,forensic,audit} render but switching does NOT update the body \u2014 main agent needs to fix tab content rendering before next smoke run.",
+  "rca_of_issue": "Issue 1 (Metro syntax error): /app/frontend/app/admin/index.tsx had a trailing orphan block `tyle: \\\"italic\\\", backgroundColor: Colors.bg, padding:8, borderRadius:8, }, reportTime:..., empty:..., emptyText:..., });` after the legitimate StyleSheet.create() closing on line 960. This was almost certainly a bad copy-paste/auto-merge artefact \u2014 the canonical block (with correct `fontStyle: \\\"italic\\\"`) already existed earlier in the file (e.g. reportDetails). Metro could not parse it, every route returned 500. Reproduced by visiting any URL on the preview host; verified fix by removing lines 961-969 and observing /premium and /(tabs)/profile bundling and rendering correctly. Issue 2 (admin tab body not switching): not RCA'd \u2014 hand-off to main agent to inspect the tab state-to-render mapping in admin/index.tsx (likely the renderActiveTab / switch is missing the new tab-keys or is keyed off label vs key mismatch)."
+}

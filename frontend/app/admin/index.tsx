@@ -5,7 +5,7 @@ import {
   StyleSheet,
   ScrollView,
   Pressable,
-  Alert,
+  TextInput,
   Image,
   RefreshControl,
 } from "react-native";
@@ -16,6 +16,7 @@ import AmbientBackground from "../../src/components/AmbientBackground";
 import { Colors, Radii } from "../../src/lib/theme";
 import { api } from "../../src/lib/api";
 import { useAuth } from "../../src/contexts/AuthContext";
+import { confirmDialog, notifyDialog } from "../../src/lib/confirm";
 
 interface UserRow {
   user_id: string;
@@ -47,7 +48,7 @@ interface Fragment {
   expires_at: string;
 }
 
-type Tab = "users" | "reports" | "forensic" | "audit";
+type Tab = "users" | "reports" | "billing" | "roles" | "analytics" | "forensic" | "audit";
 
 export default function AdminDashboard() {
   const { user } = useAuth();
@@ -57,6 +58,11 @@ export default function AdminDashboard() {
   const [reports, setReports] = useState<Report[]>([]);
   const [fragments, setFragments] = useState<Fragment[]>([]);
   const [audit, setAudit] = useState<any[]>([]);
+  const [premiumUsers, setPremiumUsers] = useState<UserRow[]>([]);
+  const [billingEvents, setBillingEvents] = useState<any[]>([]);
+  const [customRoles, setCustomRoles] = useState<any[]>([]);
+  const [permCatalog, setPermCatalog] = useState<string[]>([]);
+  const [analytics, setAnalytics] = useState<any | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
   const isSuper = user?.role === "super_admin";
@@ -75,9 +81,29 @@ export default function AdminDashboard() {
       } else if (tab === "audit") {
         const r = await api<{ actions: any[] }>("/admin/audit");
         setAudit(r.actions || []);
+      } else if (tab === "billing") {
+        const [pu, ev] = await Promise.all([
+          api<{ users: UserRow[] }>("/admin/billing/users"),
+          api<{ events: any[] }>("/admin/billing/events"),
+        ]);
+        setPremiumUsers(pu.users || []);
+        setBillingEvents(ev.events || []);
+      } else if (tab === "roles") {
+        const [rs, perms] = await Promise.all([
+          api<{ roles: any[] }>("/admin/roles"),
+          api<{ catalog: string[] }>("/admin/permissions"),
+        ]);
+        setCustomRoles(rs.roles || []);
+        setPermCatalog(perms.catalog || []);
+        // also load users so we can assign roles
+        const u = await api<{ users: UserRow[] }>("/admin/users");
+        setUsers(u.users || []);
+      } else if (tab === "analytics") {
+        const a = await api<any>("/admin/analytics/summary");
+        setAnalytics(a);
       }
     } catch (e: any) {
-      Alert.alert("Couldn't load", e?.message || "Try again");
+      notifyDialog("Couldn't load", e?.message || "Try again");
     }
   }, [tab]);
 
@@ -96,42 +122,66 @@ export default function AdminDashboard() {
     return <Redirect href="/(tabs)" />;
   }
 
-  const action = (target_user_id: string, act: string, label: string) => {
-    Alert.alert(label, "Apply this action?", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Apply",
-        onPress: async () => {
-          try {
-            await api("/admin/users/action", {
-              body: { target_user_id, action: act },
-            });
-            await load();
-          } catch (e: any) {
-            Alert.alert("Failed", e?.message || "Try again");
-          }
-        },
-      },
-    ]);
+  const action = async (target_user_id: string, act: string, label: string) => {
+    const ok = await confirmDialog({
+      title: label,
+      message: "Apply this action?",
+      confirmLabel: "Apply",
+      destructive: act === "blacklist" || act === "suspend",
+    });
+    if (!ok) return;
+    try {
+      await api("/admin/users/action", { body: { target_user_id, action: act } });
+      await load();
+    } catch (e: any) {
+      notifyDialog("Failed", e?.message || "Try again");
+    }
   };
 
-  const role = (target_user_id: string, newRole: string) => {
-    Alert.alert("Change role", `Set role to ${newRole}?`, [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Apply",
-        onPress: async () => {
-          try {
-            await api("/admin/users/role", {
-              body: { target_user_id, role: newRole },
-            });
-            await load();
-          } catch (e: any) {
-            Alert.alert("Failed", e?.message || "Try again");
-          }
-        },
-      },
-    ]);
+  const role = async (target_user_id: string, newRole: string) => {
+    const ok = await confirmDialog({
+      title: "Change role",
+      message: `Set role to ${newRole}?`,
+      confirmLabel: "Apply",
+    });
+    if (!ok) return;
+    try {
+      await api("/admin/users/role", { body: { target_user_id, role: newRole } });
+      await load();
+    } catch (e: any) {
+      notifyDialog("Failed", e?.message || "Try again");
+    }
+  };
+
+  const grantPremium = async (target_user_id: string, plan_id: string) => {
+    const ok = await confirmDialog({
+      title: "Grant premium",
+      message: `Grant ${plan_id} to this user?`,
+      confirmLabel: "Grant",
+    });
+    if (!ok) return;
+    try {
+      await api("/admin/billing/grant", { body: { target_user_id, plan_id } });
+      await load();
+    } catch (e: any) {
+      notifyDialog("Failed", e?.message || "Try again");
+    }
+  };
+
+  const revokePremium = async (target_user_id: string) => {
+    const ok = await confirmDialog({
+      title: "Revoke premium?",
+      message: "This user will be moved back to the free tier.",
+      confirmLabel: "Revoke",
+      destructive: true,
+    });
+    if (!ok) return;
+    try {
+      await api("/admin/billing/revoke", { body: { target_user_id, plan_id: "monthly_inr" } });
+      await load();
+    } catch (e: any) {
+      notifyDialog("Failed", e?.message || "Try again");
+    }
   };
 
   return (
@@ -154,18 +204,21 @@ export default function AdminDashboard() {
           <View style={{ width: 36 }} />
         </View>
 
-        <View style={styles.tabsRow}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.tabsRow}
+        >
           <TabBtn label="Users" active={tab === "users"} onPress={() => setTab("users")} />
           <TabBtn label="Reports" active={tab === "reports"} onPress={() => setTab("reports")} />
+          <TabBtn label="Billing" active={tab === "billing"} onPress={() => setTab("billing")} />
+          <TabBtn label="Roles" active={tab === "roles"} onPress={() => setTab("roles")} />
+          <TabBtn label="Analytics" active={tab === "analytics"} onPress={() => setTab("analytics")} />
           {isSuper ? (
-            <TabBtn
-              label="Forensic"
-              active={tab === "forensic"}
-              onPress={() => setTab("forensic")}
-            />
+            <TabBtn label="Forensic" active={tab === "forensic"} onPress={() => setTab("forensic")} />
           ) : null}
           <TabBtn label="Audit" active={tab === "audit"} onPress={() => setTab("audit")} />
-        </View>
+        </ScrollView>
 
         <ScrollView
           contentContainerStyle={styles.scroll}
@@ -320,7 +373,9 @@ export default function AdminDashboard() {
           {(tab === "users" && users.length === 0) ||
           (tab === "reports" && reports.length === 0) ||
           (tab === "forensic" && fragments.length === 0) ||
-          (tab === "audit" && audit.length === 0) ? (
+          (tab === "audit" && audit.length === 0) ||
+          (tab === "billing" && premiumUsers.length === 0 && billingEvents.length === 0) ||
+          (tab === "roles" && customRoles.length === 0) ? (
             <View style={styles.empty}>
               <Ionicons name="leaf-outline" size={28} color={Colors.brandPrimary} />
               <Text style={styles.emptyText}>Nothing to review here.</Text>
@@ -329,6 +384,374 @@ export default function AdminDashboard() {
         </ScrollView>
       </SafeAreaView>
     </AmbientBackground>
+  );
+}
+
+// ---------------- Billing tab ----------------
+function BillingTab({
+  users,
+  events,
+  onGrant,
+  onRevoke,
+  isSuper,
+}: {
+  users: UserRow[];
+  events: any[];
+  onGrant: (id: string, plan: string) => void;
+  onRevoke: (id: string) => void;
+  isSuper: boolean;
+}) {
+  const [search, setSearch] = useState("");
+  const [allUsers, setAllUsers] = useState<UserRow[]>([]);
+
+  React.useEffect(() => {
+    api<{ users: UserRow[] }>("/admin/users").then((r) => setAllUsers(r.users || []));
+  }, []);
+
+  const matches = search
+    ? allUsers.filter(
+        (u) =>
+          u.email.toLowerCase().includes(search.toLowerCase()) ||
+          (u.name || "").toLowerCase().includes(search.toLowerCase())
+      ).slice(0, 20)
+    : [];
+
+  return (
+    <>
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Grant Premium</Text>
+        <Text style={styles.sectionHint}>
+          Search a user by email/name, then grant them a plan.
+        </Text>
+        <TextInput
+          value={search}
+          onChangeText={setSearch}
+          placeholder="Search by email or name…"
+          placeholderTextColor={Colors.textTertiary}
+          style={styles.searchInput}
+          testID="admin-billing-search"
+          autoCapitalize="none"
+        />
+        {matches.map((u) => (
+          <View key={u.user_id} style={styles.miniRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.userName}>{u.name}</Text>
+              <Text style={styles.userEmail}>
+                {u.email} · {u.is_premium ? "PREMIUM" : "FREE"}
+              </Text>
+            </View>
+            <Pressable
+              style={[styles.grantBtn, { backgroundColor: Colors.brandFog }]}
+              onPress={() => onGrant(u.user_id, "monthly_inr")}
+              testID={`grant-monthly-${u.user_id}`}
+            >
+              <Text style={styles.grantBtnText}>+30d</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.grantBtn, { backgroundColor: "#FEF3C7" }]}
+              onPress={() => onGrant(u.user_id, "yearly_inr")}
+              testID={`grant-yearly-${u.user_id}`}
+            >
+              <Text style={[styles.grantBtnText, { color: "#B45309" }]}>+1yr</Text>
+            </Pressable>
+            {u.is_premium && isSuper ? (
+              <Pressable
+                style={[styles.grantBtn, { backgroundColor: Colors.dangerBg }]}
+                onPress={() => onRevoke(u.user_id)}
+                testID={`revoke-${u.user_id}`}
+              >
+                <Text style={[styles.grantBtnText, { color: Colors.danger }]}>
+                  REVOKE
+                </Text>
+              </Pressable>
+            ) : null}
+          </View>
+        ))}
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Active premium users</Text>
+        {users.length === 0 ? (
+          <Text style={styles.sectionHint}>No active premium users yet.</Text>
+        ) : (
+          users.map((u) => (
+            <View key={u.user_id} style={styles.miniRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.userName}>{u.name}</Text>
+                <Text style={styles.userEmail}>
+                  {u.email} · until{" "}
+                  {(u as any).premium_until
+                    ? new Date((u as any).premium_until).toLocaleDateString()
+                    : "—"}
+                </Text>
+              </View>
+              {isSuper ? (
+                <Pressable
+                  style={[styles.grantBtn, { backgroundColor: Colors.dangerBg }]}
+                  onPress={() => onRevoke(u.user_id)}
+                  testID={`revoke-active-${u.user_id}`}
+                >
+                  <Text style={[styles.grantBtnText, { color: Colors.danger }]}>
+                    REVOKE
+                  </Text>
+                </Pressable>
+              ) : null}
+            </View>
+          ))
+        )}
+      </View>
+
+      {events.length > 0 ? (
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>Recent billing events</Text>
+          {events.slice(0, 10).map((e) => (
+            <View key={e.event_id} style={styles.miniRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.userName}>{e.type}</Text>
+                <Text style={styles.userEmail}>
+                  user {e.user_id} · {e.plan_id || "—"}
+                  {e.by_name ? ` · by ${e.by_name}` : ""}
+                </Text>
+              </View>
+              <Text style={styles.timeText}>
+                {e.created_at ? new Date(e.created_at).toLocaleString() : ""}
+              </Text>
+            </View>
+          ))}
+        </View>
+      ) : null}
+    </>
+  );
+}
+
+// ---------------- Roles tab ----------------
+function RolesTab({
+  roles,
+  perms,
+  users,
+  isSuper,
+  onCreated,
+  onAssigned,
+}: {
+  roles: any[];
+  perms: string[];
+  users: UserRow[];
+  isSuper: boolean;
+  onCreated: () => void;
+  onAssigned: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [desc, setDesc] = useState("");
+  const [chosen, setChosen] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
+  const [search, setSearch] = useState("");
+
+  const togglePerm = (p: string) => {
+    setChosen((prev) => {
+      const next = new Set(prev);
+      if (next.has(p)) next.delete(p);
+      else next.add(p);
+      return next;
+    });
+  };
+
+  const create = async () => {
+    if (name.length < 2) return;
+    setBusy(true);
+    try {
+      await api("/admin/roles", {
+        body: { name, description: desc, permissions: Array.from(chosen) },
+      });
+      setName("");
+      setDesc("");
+      setChosen(new Set());
+      onCreated();
+    } catch (e: any) {
+      notifyDialog("Failed", e?.message || "Try again");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const matches = search
+    ? users.filter(
+        (u) =>
+          u.email.toLowerCase().includes(search.toLowerCase()) ||
+          (u.name || "").toLowerCase().includes(search.toLowerCase())
+      ).slice(0, 10)
+    : [];
+
+  const assign = async (target_user_id: string, role_id: string) => {
+    try {
+      await api("/admin/users/assign-role", { body: { target_user_id, role_id } });
+      onAssigned();
+      notifyDialog("Role assigned", "User now has the new role permissions.");
+    } catch (e: any) {
+      notifyDialog("Failed", e?.message || "Try again");
+    }
+  };
+
+  return (
+    <>
+      {isSuper ? (
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>Create custom role</Text>
+          <Text style={styles.sectionHint}>
+            Build organizational roles like "Trust & Safety Lead" or "Recruitment".
+          </Text>
+          <TextInput
+            value={name}
+            onChangeText={setName}
+            placeholder="Role name (e.g. Trust & Safety Lead)"
+            placeholderTextColor={Colors.textTertiary}
+            style={styles.searchInput}
+            testID="role-name-input"
+          />
+          <TextInput
+            value={desc}
+            onChangeText={setDesc}
+            placeholder="Brief description (optional)"
+            placeholderTextColor={Colors.textTertiary}
+            style={styles.searchInput}
+            testID="role-desc-input"
+          />
+          <Text style={[styles.sectionHint, { marginTop: 4 }]}>Permissions</Text>
+          <View style={styles.permGrid}>
+            {perms.map((p) => (
+              <Pressable
+                key={p}
+                onPress={() => togglePerm(p)}
+                style={[
+                  styles.permChip,
+                  chosen.has(p) && styles.permChipActive,
+                ]}
+                testID={`perm-${p}`}
+              >
+                <Text
+                  style={[
+                    styles.permChipText,
+                    chosen.has(p) && { color: Colors.brandDeep, fontWeight: "700" },
+                  ]}
+                >
+                  {p}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+          <Pressable
+            onPress={create}
+            disabled={busy || name.length < 2}
+            style={[
+              styles.primaryBtn,
+              (busy || name.length < 2) && { opacity: 0.5 },
+            ]}
+            testID="create-role-btn"
+          >
+            <Text style={styles.primaryBtnText}>
+              {busy ? "Creating…" : "Create role"}
+            </Text>
+          </Pressable>
+        </View>
+      ) : null}
+
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Existing roles ({roles.length})</Text>
+        {roles.length === 0 ? (
+          <Text style={styles.sectionHint}>No custom roles yet.</Text>
+        ) : (
+          roles.map((r) => (
+            <View key={r.role_id} style={styles.roleCard} testID={`role-${r.role_id}`}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.userName}>{r.name}</Text>
+                {r.description ? (
+                  <Text style={styles.userEmail}>{r.description}</Text>
+                ) : null}
+                <View style={styles.permGrid}>
+                  {(r.permissions || []).map((p: string) => (
+                    <View key={p} style={[styles.permChip, styles.permChipActive]}>
+                      <Text
+                        style={[
+                          styles.permChipText,
+                          { color: Colors.brandDeep, fontWeight: "700" },
+                        ]}
+                      >
+                        {p}
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+              </View>
+            </View>
+          ))
+        )}
+      </View>
+
+      {isSuper && roles.length > 0 ? (
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>Assign role to user</Text>
+          <TextInput
+            value={search}
+            onChangeText={setSearch}
+            placeholder="Search user by email/name"
+            placeholderTextColor={Colors.textTertiary}
+            style={styles.searchInput}
+            testID="role-assign-search"
+            autoCapitalize="none"
+          />
+          {matches.map((u) => (
+            <View key={u.user_id} style={styles.miniRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.userName}>{u.name}</Text>
+                <Text style={styles.userEmail}>{u.email}</Text>
+              </View>
+              <ScrollView horizontal>
+                {roles.map((r) => (
+                  <Pressable
+                    key={r.role_id}
+                    style={styles.grantBtn}
+                    onPress={() => assign(u.user_id, r.role_id)}
+                    testID={`assign-${r.role_id}-${u.user_id}`}
+                  >
+                    <Text style={styles.grantBtnText}>+ {r.name}</Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+            </View>
+          ))}
+        </View>
+      ) : null}
+    </>
+  );
+}
+
+// ---------------- Analytics tab ----------------
+function AnalyticsTab({ data }: { data: any }) {
+  const cells = [
+    { label: "Total users", value: data?.users?.total ?? 0, icon: "people-outline" },
+    { label: "Verified", value: data?.users?.verified ?? 0, icon: "shield-checkmark-outline" },
+    { label: "Premium", value: data?.users?.premium ?? 0, icon: "diamond-outline" },
+    { label: "Suspended", value: data?.users?.suspended ?? 0, icon: "pause-circle-outline" },
+    { label: "Blacklisted", value: data?.users?.blacklisted ?? 0, icon: "ban-outline" },
+    { label: "Open reports", value: data?.reports?.open ?? 0, icon: "alert-circle-outline" },
+    { label: "Active rooms", value: data?.rooms?.active ?? 0, icon: "cube-outline" },
+    { label: "Rooms today", value: data?.rooms?.today ?? 0, icon: "today-outline" },
+  ];
+  return (
+    <View style={styles.analyticsGrid}>
+      {cells.map((c) => (
+        <View key={c.label} style={styles.statCard} testID={`metric-${c.label}`}>
+          <View style={styles.statIcon}>
+            <Ionicons
+              name={c.icon as any}
+              size={18}
+              color={Colors.brandPrimary}
+            />
+          </View>
+          <Text style={styles.statNum}>{c.value}</Text>
+          <Text style={styles.statLabel}>{c.label}</Text>
+        </View>
+      ))}
+    </View>
   );
 }
 
@@ -453,6 +876,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     gap: 8,
     paddingBottom: 8,
+    paddingRight: 32,
   },
   tabBtn: {
     paddingHorizontal: 14,

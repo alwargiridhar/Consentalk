@@ -108,6 +108,117 @@ class User(BaseModel):
     status: str = "active"
     created_at: datetime
     last_active: Optional[datetime] = None
+    # Premium / RBAC fields (added in iteration 3)
+    is_premium: bool = False
+    premium_until: Optional[datetime] = None
+    premium_plan: Optional[str] = None  # e.g. "monthly_inr", "yearly_inr"
+    extra_roles: List[str] = []  # additional RBAC roles beyond `role`
+    permissions: List[str] = []  # explicit permission grants
+    display_alias: Optional[str] = None  # custom 2-3 char alias for privacy
+
+
+class SubscribeInput(BaseModel):
+    plan_id: str  # monthly_inr | yearly_inr | monthly_usd | yearly_usd
+
+
+class GrantPremiumInput(BaseModel):
+    target_user_id: str
+    plan_id: str  # same set
+    days: Optional[int] = None  # override duration (super-admin)
+
+
+class RoleDef(BaseModel):
+    role_id: str
+    name: str
+    description: Optional[str] = None
+    permissions: List[str] = []
+
+
+class CreateRoleInput(BaseModel):
+    name: str
+    description: Optional[str] = None
+    permissions: List[str] = []
+
+
+class AssignRoleInput(BaseModel):
+    target_user_id: str
+    role_id: str
+    probationary: bool = False
+    expires_in_days: Optional[int] = None
+
+
+# ------------- Plans / pricing (server-of-truth) -------------
+PLANS: Dict[str, Dict[str, Any]] = {
+    "monthly_inr": {
+        "id": "monthly_inr",
+        "name": "Consentalk Presence — Monthly",
+        "currency": "INR",
+        "price": 199,
+        "price_label": "₹199 / month",
+        "days": 30,
+    },
+    "yearly_inr": {
+        "id": "yearly_inr",
+        "name": "Consentalk Presence — Yearly",
+        "currency": "INR",
+        "price": 1999,
+        "price_label": "₹1,999 / year",
+        "days": 365,
+    },
+    "monthly_usd": {
+        "id": "monthly_usd",
+        "name": "Consentalk Presence — Monthly",
+        "currency": "USD",
+        "price": 2.99,
+        "price_label": "$2.99 / month",
+        "days": 30,
+    },
+    "yearly_usd": {
+        "id": "yearly_usd",
+        "name": "Consentalk Presence — Yearly",
+        "currency": "USD",
+        "price": 29.99,
+        "price_label": "$29.99 / year",
+        "days": 365,
+    },
+}
+
+# Free-tier limits
+FREE_ROOMS_PER_DAY = 1
+FREE_IMAGES_PER_SESSION = 3
+
+# Built-in / default permission catalog
+PERMISSION_CATALOG = [
+    "moderation.review",
+    "moderation.action_user",
+    "moderation.blacklist",
+    "billing.grant",
+    "billing.revoke",
+    "billing.view",
+    "rbac.manage_roles",
+    "rbac.assign_roles",
+    "analytics.view",
+    "support.view_tickets",
+    "support.close_tickets",
+    "region.manage",
+    "feature_flags.manage",
+    "career.promote",
+    "career.invite",
+    "forensic.view",
+]
+
+
+def _is_premium_active(user: Dict[str, Any]) -> bool:
+    if not user:
+        return False
+    if user.get("role") in ("admin", "super_admin"):
+        return True  # admins/super-admins always treated as premium
+    if not user.get("is_premium"):
+        return False
+    until = user.get("premium_until")
+    if isinstance(until, datetime):
+        return until.replace(tzinfo=timezone.utc) > utcnow() if until.tzinfo is None else until > utcnow()
+    return True
 
 
 class SessionDataInput(BaseModel):
@@ -445,7 +556,13 @@ async def voice_transcribe(
     tmp.close()
     try:
         stt = OpenAISpeechToText(api_key=EMERGENT_LLM_KEY)
-        result = await stt.transcribe(file=tmp.name, model="whisper-1", response_format="json")
+        # Newer litellm requires bytes/IO/PathLike (not a str path) for `file`.
+        # Pass an open binary file handle. Library validates via str path first
+        # (size+ext checks), so we keep the temp file on disk and reopen here.
+        with open(tmp.name, "rb") as fh:
+            result = await stt.transcribe(
+                file=fh, model="whisper-1", response_format="json"
+            )
         if isinstance(result, dict):
             text = result.get("text", "")
         else:
@@ -475,6 +592,22 @@ async def create_room(payload: CreateRoomInput, user: User = Depends(get_current
         raise HTTPException(status_code=400, detail="PIN must be at least 4 digits")
     if payload.room_type not in ("duo", "circle"):
         raise HTTPException(status_code=400, detail="Invalid room type")
+
+    # Free-tier limit: 1 room/day. Admin/super-admin/premium are unlimited.
+    user_doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
+    if not _is_premium_active(user_doc or {}):
+        day_start = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        rooms_today = await db.rooms.count_documents(
+            {"owner_user_id": user.user_id, "created_at": {"$gte": day_start}}
+        )
+        if rooms_today >= FREE_ROOMS_PER_DAY:
+            raise HTTPException(
+                status_code=402,
+                detail=(
+                    "Free tier allows 1 room per day. Upgrade to Consentalk "
+                    "Presence for unlimited rooms."
+                ),
+            )
 
     room_id = f"room_{uuid.uuid4().hex[:14]}"
     await db.rooms.insert_one(
@@ -834,6 +967,27 @@ async def send_message(
         raise HTTPException(status_code=400, detail="Invalid content_type")
     if not payload.content:
         raise HTTPException(status_code=400, detail="Empty content")
+    # Free-tier image quota: 3 images per active session per user.
+    if payload.content_type == "image":
+        user_doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
+        if not _is_premium_active(user_doc or {}):
+            session_started = room.get("last_ended_at") or room.get("created_at") or utcnow()
+            count = await db.messages.count_documents(
+                {
+                    "room_id": room_id,
+                    "sender_user_id": user.user_id,
+                    "content_type": "image",
+                    "created_at": {"$gte": session_started},
+                }
+            )
+            if count >= FREE_IMAGES_PER_SESSION:
+                raise HTTPException(
+                    status_code=402,
+                    detail=(
+                        f"Free tier allows {FREE_IMAGES_PER_SESSION} images per session. "
+                        "Upgrade to Consentalk Presence for unlimited media."
+                    ),
+                )
     msg = {
         "message_id": f"msg_{uuid.uuid4().hex[:14]}",
         "room_id": room_id,
@@ -1055,6 +1209,404 @@ async def admin_audit(admin: User = Depends(require_admin)):
         if isinstance(it.get("created_at"), datetime):
             it["created_at"] = it["created_at"].isoformat()
     return {"actions": items}
+
+
+# ---------------------------------------------------------------------------
+# Billing & Premium (Iteration 3)
+# ---------------------------------------------------------------------------
+@api_router.get("/billing/plans")
+async def billing_plans():
+    return {
+        "plans": list(PLANS.values()),
+        "free_tier": {
+            "rooms_per_day": FREE_ROOMS_PER_DAY,
+            "images_per_session": FREE_IMAGES_PER_SESSION,
+            "features": [
+                "Voice phrase access",
+                "Basic encrypted messaging",
+                "Force exit safety tools",
+                "Unlimited room joining",
+                f"{FREE_IMAGES_PER_SESSION} images per session",
+                f"{FREE_ROOMS_PER_DAY} room creation per day",
+            ],
+        },
+        "premium_features": [
+            "Unlimited room creation",
+            "Unlimited media sharing",
+            "Custom room expiration windows",
+            "Multi-device continuity",
+            "Trusted Circles",
+            "Priority safety support",
+            "Advanced phrase management",
+        ],
+    }
+
+
+@api_router.get("/billing/me")
+async def billing_me(user: User = Depends(get_current_user)):
+    user_doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
+    if not user_doc:
+        raise HTTPException(status_code=404, detail="User not found")
+    active = _is_premium_active(user_doc)
+    until = user_doc.get("premium_until")
+    if isinstance(until, datetime):
+        until_iso = until.isoformat()
+    else:
+        until_iso = until
+    return {
+        "is_premium": active,
+        "premium_until": until_iso,
+        "premium_plan": user_doc.get("premium_plan"),
+        "is_admin_unlimited": user.role in ("admin", "super_admin"),
+    }
+
+
+@api_router.post("/billing/subscribe")
+async def billing_subscribe(payload: SubscribeInput, user: User = Depends(get_current_user)):
+    """MOCKED subscribe — in production this would integrate with Razorpay/Stripe.
+    For MVP we mark the user premium immediately and log it for transparency."""
+    plan = PLANS.get(payload.plan_id)
+    if not plan:
+        raise HTTPException(status_code=400, detail="Unknown plan")
+    user_doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
+    base = utcnow()
+    until_existing = (user_doc or {}).get("premium_until")
+    if isinstance(until_existing, datetime):
+        existing = until_existing.replace(tzinfo=timezone.utc) if until_existing.tzinfo is None else until_existing
+        if existing > base:
+            base = existing
+    new_until = base + timedelta(days=plan["days"])
+    await db.users.update_one(
+        {"user_id": user.user_id},
+        {
+            "$set": {
+                "is_premium": True,
+                "premium_plan": plan["id"],
+                "premium_until": new_until,
+            }
+        },
+    )
+    await db.billing_events.insert_one(
+        {
+            "event_id": f"bill_{uuid.uuid4().hex[:12]}",
+            "user_id": user.user_id,
+            "type": "subscribe_self_mocked",
+            "plan_id": plan["id"],
+            "amount": plan["price"],
+            "currency": plan["currency"],
+            "premium_until": new_until,
+            "created_at": utcnow(),
+        }
+    )
+    return {
+        "ok": True,
+        "mocked": True,
+        "premium_until": new_until.isoformat(),
+        "plan": plan,
+    }
+
+
+@api_router.post("/billing/cancel")
+async def billing_cancel(user: User = Depends(get_current_user)):
+    """User-initiated downgrade — premium runs out at the existing premium_until,
+    but plan auto-renew is turned off (we do not auto-renew anyway in this MVP)."""
+    await db.billing_events.insert_one(
+        {
+            "event_id": f"bill_{uuid.uuid4().hex[:12]}",
+            "user_id": user.user_id,
+            "type": "cancel_self",
+            "created_at": utcnow(),
+        }
+    )
+    return {"ok": True}
+
+
+@api_router.get("/admin/billing/users")
+async def admin_billing_users(admin: User = Depends(require_admin)):
+    if admin.role != "super_admin" and "billing.view" not in (admin.permissions or []):
+        raise HTTPException(status_code=403, detail="billing.view required")
+    cursor = db.users.find(
+        {"is_premium": True}, {"_id": 0, "verification_data": 0}
+    ).sort("premium_until", -1)
+    items = await cursor.to_list(500)
+    for it in items:
+        if isinstance(it.get("premium_until"), datetime):
+            it["premium_until"] = it["premium_until"].isoformat()
+        if isinstance(it.get("created_at"), datetime):
+            it["created_at"] = it["created_at"].isoformat()
+        if isinstance(it.get("last_active"), datetime):
+            it["last_active"] = it["last_active"].isoformat()
+    return {"users": items}
+
+
+@api_router.post("/admin/billing/grant")
+async def admin_billing_grant(
+    payload: GrantPremiumInput, admin: User = Depends(require_admin)
+):
+    if admin.role != "super_admin" and "billing.grant" not in (admin.permissions or []):
+        raise HTTPException(status_code=403, detail="billing.grant required")
+    plan = PLANS.get(payload.plan_id)
+    if not plan:
+        raise HTTPException(status_code=400, detail="Unknown plan")
+    target = await db.users.find_one({"user_id": payload.target_user_id}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    days = payload.days if payload.days is not None else plan["days"]
+    base = utcnow()
+    existing = target.get("premium_until")
+    if isinstance(existing, datetime):
+        existing_aware = (
+            existing.replace(tzinfo=timezone.utc) if existing.tzinfo is None else existing
+        )
+        if existing_aware > base:
+            base = existing_aware
+    new_until = base + timedelta(days=int(days))
+    await db.users.update_one(
+        {"user_id": payload.target_user_id},
+        {
+            "$set": {
+                "is_premium": True,
+                "premium_plan": plan["id"],
+                "premium_until": new_until,
+            }
+        },
+    )
+    await db.billing_events.insert_one(
+        {
+            "event_id": f"bill_{uuid.uuid4().hex[:12]}",
+            "user_id": payload.target_user_id,
+            "type": "admin_grant",
+            "by_user_id": admin.user_id,
+            "by_name": admin.name,
+            "plan_id": plan["id"],
+            "days": int(days),
+            "premium_until": new_until,
+            "created_at": utcnow(),
+        }
+    )
+    await db.admin_actions.insert_one(
+        {
+            "action_id": f"act_{uuid.uuid4().hex[:12]}",
+            "admin_user_id": admin.user_id,
+            "admin_name": admin.name,
+            "target_user_id": payload.target_user_id,
+            "action": f"premium_grant:{plan['id']}:{int(days)}d",
+            "reason": "",
+            "created_at": utcnow(),
+        }
+    )
+    return {"ok": True, "premium_until": new_until.isoformat()}
+
+
+@api_router.post("/admin/billing/revoke")
+async def admin_billing_revoke(
+    payload: GrantPremiumInput, admin: User = Depends(require_admin)
+):
+    if admin.role != "super_admin" and "billing.revoke" not in (admin.permissions or []):
+        raise HTTPException(status_code=403, detail="billing.revoke required")
+    target = await db.users.find_one({"user_id": payload.target_user_id}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    await db.users.update_one(
+        {"user_id": payload.target_user_id},
+        {
+            "$set": {
+                "is_premium": False,
+                "premium_until": None,
+                "premium_plan": None,
+            }
+        },
+    )
+    await db.billing_events.insert_one(
+        {
+            "event_id": f"bill_{uuid.uuid4().hex[:12]}",
+            "user_id": payload.target_user_id,
+            "type": "admin_revoke",
+            "by_user_id": admin.user_id,
+            "by_name": admin.name,
+            "created_at": utcnow(),
+        }
+    )
+    await db.admin_actions.insert_one(
+        {
+            "action_id": f"act_{uuid.uuid4().hex[:12]}",
+            "admin_user_id": admin.user_id,
+            "admin_name": admin.name,
+            "target_user_id": payload.target_user_id,
+            "action": "premium_revoke",
+            "reason": "",
+            "created_at": utcnow(),
+        }
+    )
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# RBAC (Iteration 3)
+# ---------------------------------------------------------------------------
+@api_router.get("/admin/permissions")
+async def admin_permissions(admin: User = Depends(require_admin)):
+    return {"catalog": PERMISSION_CATALOG}
+
+
+@api_router.get("/admin/roles")
+async def admin_roles_list(admin: User = Depends(require_admin)):
+    cursor = db.custom_roles.find({}, {"_id": 0}).sort("created_at", 1)
+    items = await cursor.to_list(500)
+    return {"roles": items}
+
+
+@api_router.post("/admin/roles")
+async def admin_roles_create(
+    payload: CreateRoleInput, super_admin: User = Depends(require_super_admin)
+):
+    name = (payload.name or "").strip()
+    if len(name) < 2:
+        raise HTTPException(status_code=400, detail="Role name too short")
+    role_id = f"role_{uuid.uuid4().hex[:10]}"
+    perms = [p for p in (payload.permissions or []) if p in PERMISSION_CATALOG]
+    await db.custom_roles.insert_one(
+        {
+            "role_id": role_id,
+            "name": name,
+            "description": (payload.description or "").strip(),
+            "permissions": perms,
+            "created_by": super_admin.user_id,
+            "created_at": utcnow(),
+        }
+    )
+    return {"ok": True, "role_id": role_id, "permissions": perms}
+
+
+@api_router.delete("/admin/roles/{role_id}")
+async def admin_roles_delete(role_id: str, super_admin: User = Depends(require_super_admin)):
+    res = await db.custom_roles.delete_one({"role_id": role_id})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Role not found")
+    # Pull this role from any users' extra_roles list
+    await db.users.update_many({}, {"$pull": {"extra_roles": role_id}})
+    return {"ok": True}
+
+
+@api_router.post("/admin/users/assign-role")
+async def admin_assign_role(
+    payload: AssignRoleInput, super_admin: User = Depends(require_super_admin)
+):
+    role = await db.custom_roles.find_one({"role_id": payload.role_id}, {"_id": 0})
+    if not role:
+        raise HTTPException(status_code=404, detail="Role not found")
+    target = await db.users.find_one({"user_id": payload.target_user_id}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    # union the role's permissions onto user.permissions
+    new_perms = list(set((target.get("permissions") or []) + role.get("permissions", [])))
+    await db.users.update_one(
+        {"user_id": payload.target_user_id},
+        {
+            "$set": {"permissions": new_perms},
+            "$addToSet": {"extra_roles": payload.role_id},
+        },
+    )
+    await db.admin_actions.insert_one(
+        {
+            "action_id": f"act_{uuid.uuid4().hex[:12]}",
+            "admin_user_id": super_admin.user_id,
+            "admin_name": super_admin.name,
+            "target_user_id": payload.target_user_id,
+            "action": f"role_assign:{role['name']}"
+            + (":probationary" if payload.probationary else ""),
+            "reason": "",
+            "created_at": utcnow(),
+        }
+    )
+    return {"ok": True, "permissions": new_perms}
+
+
+@api_router.post("/admin/users/revoke-role")
+async def admin_revoke_role(
+    payload: AssignRoleInput, super_admin: User = Depends(require_super_admin)
+):
+    role = await db.custom_roles.find_one({"role_id": payload.role_id}, {"_id": 0})
+    if not role:
+        raise HTTPException(status_code=404, detail="Role not found")
+    target = await db.users.find_one({"user_id": payload.target_user_id}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    other_roles = [
+        r for r in (target.get("extra_roles") or []) if r != payload.role_id
+    ]
+    rebuilt: List[str] = []
+    for r_id in other_roles:
+        rd = await db.custom_roles.find_one({"role_id": r_id}, {"_id": 0})
+        if rd:
+            rebuilt += rd.get("permissions", [])
+    await db.users.update_one(
+        {"user_id": payload.target_user_id},
+        {
+            "$set": {
+                "extra_roles": other_roles,
+                "permissions": list(set(rebuilt)),
+            }
+        },
+    )
+    await db.admin_actions.insert_one(
+        {
+            "action_id": f"act_{uuid.uuid4().hex[:12]}",
+            "admin_user_id": super_admin.user_id,
+            "admin_name": super_admin.name,
+            "target_user_id": payload.target_user_id,
+            "action": f"role_revoke:{role['name']}",
+            "reason": "",
+            "created_at": utcnow(),
+        }
+    )
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Admin analytics
+# ---------------------------------------------------------------------------
+@api_router.get("/admin/analytics/summary")
+async def admin_analytics(admin: User = Depends(require_admin)):
+    if admin.role != "super_admin" and "analytics.view" not in (admin.permissions or []):
+        raise HTTPException(status_code=403, detail="analytics.view required")
+    total_users = await db.users.count_documents({})
+    verified = await db.users.count_documents({"verified": True})
+    premium = await db.users.count_documents(
+        {"is_premium": True, "premium_until": {"$gt": utcnow()}}
+    )
+    rooms_active = await db.rooms.count_documents({"status": "active"})
+    rooms_total = await db.rooms.count_documents({})
+    reports_open = await db.reports.count_documents({"status": "open"})
+    blacklisted = await db.users.count_documents({"status": "blacklisted"})
+    suspended = await db.users.count_documents({"status": "suspended"})
+    day_start = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    rooms_today = await db.rooms.count_documents({"created_at": {"$gte": day_start}})
+    return {
+        "users": {
+            "total": total_users,
+            "verified": verified,
+            "premium": premium,
+            "suspended": suspended,
+            "blacklisted": blacklisted,
+        },
+        "rooms": {"total": rooms_total, "active": rooms_active, "today": rooms_today},
+        "reports": {"open": reports_open},
+    }
+
+
+@api_router.get("/admin/billing/events")
+async def admin_billing_events(admin: User = Depends(require_admin)):
+    if admin.role != "super_admin" and "billing.view" not in (admin.permissions or []):
+        raise HTTPException(status_code=403, detail="billing.view required")
+    cursor = db.billing_events.find({}, {"_id": 0}).sort("created_at", -1).limit(200)
+    items = await cursor.to_list(200)
+    for it in items:
+        if isinstance(it.get("created_at"), datetime):
+            it["created_at"] = it["created_at"].isoformat()
+        if isinstance(it.get("premium_until"), datetime):
+            it["premium_until"] = it["premium_until"].isoformat()
+    return {"events": items}
 
 
 # ---------------------------------------------------------------------------

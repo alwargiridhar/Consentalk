@@ -13,6 +13,11 @@ export interface AppUser {
   verified: boolean;
   status: string;
   risk_score: number;
+  is_premium?: boolean;
+  premium_until?: string | null;
+  premium_plan?: string | null;
+  permissions?: string[];
+  extra_roles?: string[];
 }
 
 interface AuthState {

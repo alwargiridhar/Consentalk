@@ -4,16 +4,16 @@ import {
   Text,
   StyleSheet,
   ScrollView,
-  Image,
   Pressable,
-  Alert,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { LinearGradient } from "expo-linear-gradient";
 import AmbientBackground from "../../src/components/AmbientBackground";
 import { Colors, Radii } from "../../src/lib/theme";
 import { useAuth } from "../../src/contexts/AuthContext";
+import { confirmDialog, getInitials, gradientFor } from "../../src/lib/confirm";
 
 interface MenuItem {
   testID: string;
@@ -89,23 +89,33 @@ export default function ProfileScreen() {
   }
 
   items.push({
+    testID: "menu-premium",
+    icon: "diamond-outline",
+    label: user?.is_premium ? "Manage Premium" : "Upgrade to Presence",
+    caption: user?.is_premium
+      ? "You are a Premium member"
+      : "Unlimited rooms · unlimited media · ₹199/mo",
+    to: "/premium",
+    badge: user?.is_premium ? "PRESENCE" : "PRO",
+  });
+
+  items.push({
     testID: "menu-signout",
     icon: "log-out-outline",
     label: "Sign Out",
     caption: "Ends this session",
     destructive: true,
     onPress: async () => {
-      Alert.alert("Sign out", "End your Consentalk session on this device?", [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Sign out",
-          style: "destructive",
-          onPress: async () => {
-            await signOut();
-            router.replace("/auth");
-          },
-        },
-      ]);
+      const ok = await confirmDialog({
+        title: "Sign out",
+        message: "End your Consentalk session on this device?",
+        confirmLabel: "Sign out",
+        destructive: true,
+      });
+      if (ok) {
+        await signOut();
+        router.replace("/auth");
+      }
     },
   });
 
@@ -115,13 +125,13 @@ export default function ProfileScreen() {
         <ScrollView contentContainerStyle={styles.scroll}>
           <View style={styles.header}>
             <View style={styles.avatarWrap}>
-              {user?.picture ? (
-                <Image source={{ uri: user.picture }} style={styles.avatar} />
-              ) : (
-                <View style={[styles.avatar, styles.avatarFallback]}>
-                  <Ionicons name="person-outline" size={28} color="#FFFFFF" />
-                </View>
-              )}
+              <View style={[styles.avatar, styles.avatarFallback]}>
+                <LinearGradient
+                  colors={gradientFor(user?.user_id || user?.email || "?")}
+                  style={[StyleSheet.absoluteFillObject, { borderRadius: 96 }]}
+                />
+                <Text style={styles.avatarInitials}>{getInitials(user?.name)}</Text>
+              </View>
               {user?.verified ? (
                 <View style={styles.verifyDot}>
                   <Ionicons name="checkmark" size={12} color="#FFFFFF" />
@@ -129,7 +139,7 @@ export default function ProfileScreen() {
               ) : null}
             </View>
             <Text style={styles.name} testID="profile-name">
-              {user?.name}
+              {getInitials(user?.name)} <Text style={styles.alias}>· you</Text>
             </Text>
             <Text style={styles.email}>{user?.email}</Text>
             <View style={styles.badgeRow}>
@@ -143,11 +153,15 @@ export default function ProfileScreen() {
                   {user?.role?.replace("_", " ").toUpperCase()}
                 </Text>
               </View>
+              {user?.is_premium ? (
+                <View style={[styles.badge, { backgroundColor: "#FEF3C7", borderColor: "#FCD34D" }]}>
+                  <Ionicons name="diamond-outline" size={13} color="#B45309" />
+                  <Text style={[styles.badgeText, { color: "#B45309" }]}>PRESENCE</Text>
+                </View>
+              ) : null}
               <View style={styles.badge}>
                 <Ionicons name="pulse-outline" size={13} color={Colors.brandPrimary} />
-                <Text style={styles.badgeText}>
-                  {user?.status?.toUpperCase()}
-                </Text>
+                <Text style={styles.badgeText}>{user?.status?.toUpperCase()}</Text>
               </View>
             </View>
           </View>
@@ -217,12 +231,14 @@ const styles = StyleSheet.create({
   scroll: { padding: 24, paddingBottom: 80 },
   header: { alignItems: "center", paddingTop: 16, paddingBottom: 24 },
   avatarWrap: {},
-  avatar: { width: 96, height: 96, borderRadius: 96, backgroundColor: Colors.divider2 },
+  avatar: { width: 96, height: 96, borderRadius: 96, backgroundColor: Colors.divider2, overflow: "hidden", alignItems: "center", justifyContent: "center" },
   avatarFallback: {
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: Colors.brandPrimary,
   },
+  avatarInitials: { color: "#FFFFFF", fontSize: 36, fontWeight: "800", letterSpacing: 1 },
+  alias: { fontSize: 14, color: Colors.textTertiary, fontWeight: "400" },
   verifyDot: {
     position: "absolute",
     bottom: 4,
