@@ -46,11 +46,25 @@ def test_auth_me_with_bearer(api, user_a):
 
 # ---------- Profile/Verify ----------
 def test_profile_verify(api, user_a, mongo):
+    phone = "+15551234567"
+    # 1) request OTP
+    r1 = api.post(f"{BASE_URL}/api/profile/phone/request-otp",
+                  json={"phone": phone},
+                  headers={"Authorization": f"Bearer {user_a['session_token']}"})
+    assert r1.status_code == 200, r1.text
+    code = r1.json().get("dev_code")
+    assert code and len(code) == 6
+    # 2) verify OTP
+    r2 = api.post(f"{BASE_URL}/api/profile/phone/verify-otp",
+                  json={"phone": phone, "code": code},
+                  headers={"Authorization": f"Bearer {user_a['session_token']}"})
+    assert r2.status_code == 200, r2.text
+    # 3) submit verification
     payload = {
         "full_legal_name": "Alice Test",
         "date_of_birth": "1990-01-01",
-        "country": "US",
-        "phone": "+15551234567",
+        "country": "United States",
+        "phone": phone,
         "consent_acknowledged": True,
     }
     r = api.post(f"{BASE_URL}/api/profile/verify",
@@ -62,6 +76,16 @@ def test_profile_verify(api, user_a, mongo):
     # confirm persisted
     udoc = mongo.users.find_one({"user_id": user_a["user_id"]})
     assert udoc["verified"] is True
+
+
+def test_profile_verify_requires_otp(api, user_b):
+    # Without OTP, /profile/verify must reject even with consent
+    r = api.post(f"{BASE_URL}/api/profile/verify",
+                 json={"full_legal_name": "x", "date_of_birth": "2000-01-01",
+                       "country": "US", "phone": "+15551112222", "consent_acknowledged": True},
+                 headers={"Authorization": f"Bearer {user_b['session_token']}"})
+    assert r.status_code == 400
+    assert "Phone not verified" in r.text or "OTP" in r.text
 
 
 def test_profile_verify_no_consent(api, user_b):

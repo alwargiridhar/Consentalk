@@ -24,6 +24,7 @@ import Logo from "../../src/components/Logo";
 import { Colors, Radii } from "../../src/lib/theme";
 import { api, backendUrl, getStoredToken } from "../../src/lib/api";
 import { useAuth } from "../../src/contexts/AuthContext";
+import { startWebRecorder, blobFilename, WebRecorder } from "../../src/lib/webRecorder";
 
 type Step = "idle" | "phrase" | "pin" | "summoning" | "results";
 
@@ -31,6 +32,7 @@ interface RoomCard {
   room_id: string;
   name: string;
   room_type: string;
+  owner_user_id?: string;
 }
 
 export default function HomeScreen() {
@@ -40,6 +42,8 @@ export default function HomeScreen() {
   const [phrase, setPhrase] = useState("");
   const [pin, setPin] = useState("");
   const [recording, setRecording] = useState<Audio.Recording | null>(null);
+  const webRecRef = useRef<WebRecorder | null>(null);
+  const [webRecording, setWebRecording] = useState(false);
   const [busy, setBusy] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
   const [results, setResults] = useState<RoomCard[]>([]);
@@ -55,42 +59,84 @@ export default function HomeScreen() {
   };
 
   const startListening = async () => {
-    if (Platform.OS === "ios" || Platform.OS === "android") {
+    setError(null);
+    if (Platform.OS === "web") {
       try {
-        const perm = await Audio.requestPermissionsAsync();
-        if (!perm.granted) {
-          setError("Microphone permission denied. You can type the phrase instead.");
-          setStep("phrase");
-          return;
-        }
-        await Audio.setAudioModeAsync({
-          allowsRecordingIOS: true,
-          playsInSilentModeIOS: true,
-        });
-        const rec = new Audio.Recording();
-        await rec.prepareToRecordAsync(
-          Audio.RecordingOptionsPresets.HIGH_QUALITY
-        );
-        await rec.startAsync();
-        setRecording(rec);
-        await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        const rec = await startWebRecorder();
+        webRecRef.current = rec;
+        setWebRecording(true);
+        setStep("phrase");
         return;
       } catch (e: any) {
-        setError(e?.message || "Could not start recording");
+        setError(e?.message || "Microphone unavailable. Please type instead.");
         setStep("phrase");
+        setTimeout(() => phraseRef.current?.focus(), 50);
         return;
       }
     }
-    // web fallback: type the phrase
-    setStep("phrase");
-    setTimeout(() => phraseRef.current?.focus(), 50);
+    try {
+      const perm = await Audio.requestPermissionsAsync();
+      if (!perm.granted) {
+        setError("Microphone permission denied. You can type the phrase instead.");
+        setStep("phrase");
+        return;
+      }
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+      const rec = new Audio.Recording();
+      await rec.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      await rec.startAsync();
+      setRecording(rec);
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    } catch (e: any) {
+      setError(e?.message || "Could not start recording");
+      setStep("phrase");
+    }
   };
 
-  const stopListeningAndTranscribe = async () => {
-    if (!recording) {
+  const transcribeBlob = async (blob: Blob, filename: string) => {
+    setTranscribing(true);
+    try {
+      const form = new FormData();
+      form.append("file", blob, filename);
+      const token = await getStoredToken();
+      const res = await fetch(`${backendUrl()}/api/voice/transcribe`, {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        body: form,
+      });
+      if (!res.ok) throw new Error(`Transcription failed (${res.status})`);
+      const j = (await res.json()) as { text?: string };
+      const text = (j.text || "").trim();
+      if (!text) throw new Error("Could not detect a phrase. Please type instead.");
+      setPhrase(text);
+      setStep("pin");
+    } catch (e: any) {
+      setError(e?.message || "Transcription failed. Please type instead.");
       setStep("phrase");
+      setTimeout(() => phraseRef.current?.focus(), 50);
+    } finally {
+      setTranscribing(false);
+    }
+  };
+
+  const stopAndTranscribe = async () => {
+    if (Platform.OS === "web") {
+      if (!webRecRef.current) return;
+      const rec = webRecRef.current;
+      webRecRef.current = null;
+      setWebRecording(false);
+      try {
+        const blob = await rec.stop();
+        await transcribeBlob(blob, blobFilename(blob));
+      } catch (e: any) {
+        setError(e?.message || "Transcription failed");
+      }
       return;
     }
+    if (!recording) return;
     try {
       setTranscribing(true);
       await recording.stopAndUnloadAsync();
@@ -98,12 +144,8 @@ export default function HomeScreen() {
       setRecording(null);
       if (!uri) throw new Error("No recording URI");
       const form = new FormData();
-      // @ts-ignore RN FormData
-      form.append("file", {
-        uri,
-        name: "phrase.m4a",
-        type: "audio/m4a",
-      } as any);
+      // @ts-ignore RN file
+      form.append("file", { uri, name: "phrase.m4a", type: "audio/m4a" } as any);
       const token = await getStoredToken();
       const res = await fetch(`${backendUrl()}/api/voice/transcribe`, {
         method: "POST",
@@ -126,16 +168,13 @@ export default function HomeScreen() {
 
   const onMicPress = async () => {
     setError(null);
-    if (recording) {
-      await stopListeningAndTranscribe();
+    const isRec = !!recording || webRecording;
+    if (isRec) {
+      await stopAndTranscribe();
       return;
     }
-    if (step === "idle") {
-      setStep("phrase");
-      await startListening();
-    } else {
-      await startListening();
-    }
+    if (step === "idle") setStep("phrase");
+    await startListening();
   };
 
   const onTypePhrase = () => {
@@ -184,7 +223,33 @@ export default function HomeScreen() {
     }
   };
 
+  const leaveOrEnd = (room: RoomCard) => {
+    const isOwner = room.owner_user_id === user?.user_id;
+    Alert.alert(
+      isOwner ? "End & delete this room?" : "Leave this room?",
+      isOwner
+        ? "Messages will be wiped and the room will close for everyone."
+        : "You will no longer see this room when you summon.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: isOwner ? "End room" : "Leave",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await api(`/rooms/${room.room_id}/leave`, { method: "POST" });
+              setResults((prev) => prev.filter((r) => r.room_id !== room.room_id));
+            } catch (e: any) {
+              Alert.alert("Couldn't perform", e?.message || "Try again");
+            }
+          },
+        },
+      ]
+    );
+  };
+
   const pinKeys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "", "0", "back"];
+  const isRec = !!recording || webRecording;
 
   return (
     <AmbientBackground>
@@ -216,7 +281,7 @@ export default function HomeScreen() {
                 <Text style={styles.prompt}>Speak your phrase</Text>
                 <View style={{ height: 18 }} />
                 <MicrophoneOrb
-                  active={!!recording || transcribing}
+                  active={isRec || transcribing}
                   onPress={onMicPress}
                   testID="mic-orb"
                 />
@@ -228,7 +293,7 @@ export default function HomeScreen() {
                   </View>
                 ) : (
                   <Text style={styles.helper}>
-                    {recording
+                    {isRec
                       ? "Tap again to stop and verify"
                       : "Rooms only appear when summoned."}
                   </Text>
@@ -247,6 +312,8 @@ export default function HomeScreen() {
                       style={styles.input}
                       autoCorrect={false}
                       autoCapitalize="none"
+                      onSubmitEditing={onPhraseContinue}
+                      returnKeyType="next"
                     />
                     {step === "pin" ? (
                       <>
@@ -319,45 +386,55 @@ export default function HomeScreen() {
             ) : (
               <View style={styles.resultsWrap}>
                 <Text style={styles.greet}>
-                  {results.length > 0
-                    ? "These rooms appeared."
-                    : "No room responded."}
+                  {results.length > 0 ? "These rooms appeared." : "No room responded."}
                 </Text>
                 <Text style={styles.helper}>
                   {results.length > 0
-                    ? "Tap to enter. Rooms close when everyone leaves."
+                    ? "Tap to enter. Long-press to leave / end."
                     : "Phrase, PIN, or membership did not match. Try again."}
                 </Text>
-                {results.map((r) => (
-                  <Pressable
-                    key={r.room_id}
-                    testID={`room-card-${r.room_id}`}
-                    onPress={() => {
-                      Haptics.selectionAsync();
-                      router.push(`/room/${r.room_id}`);
-                    }}
-                    style={styles.roomCard}
-                  >
-                    <View style={styles.roomIcon}>
-                      <Ionicons
-                        name={r.room_type === "duo" ? "people-outline" : "people-circle-outline"}
-                        color={Colors.brandPrimary}
-                        size={22}
-                      />
+                {results.map((r) => {
+                  const isOwner = r.owner_user_id === user?.user_id;
+                  return (
+                    <View key={r.room_id} style={styles.roomCard}>
+                      <Pressable
+                        style={styles.roomCardLeft}
+                        onPress={() => {
+                          Haptics.selectionAsync().catch(() => {});
+                          router.push(`/room/${r.room_id}`);
+                        }}
+                        testID={`room-card-${r.room_id}`}
+                      >
+                        <View style={styles.roomIcon}>
+                          <Ionicons
+                            name={
+                              r.room_type === "duo" ? "people-outline" : "people-circle-outline"
+                            }
+                            color={Colors.brandPrimary}
+                            size={22}
+                          />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.roomName}>{r.name}</Text>
+                          <Text style={styles.roomMeta}>
+                            {r.room_type.toUpperCase()} ROOM • TAP TO ENTER
+                          </Text>
+                        </View>
+                      </Pressable>
+                      <Pressable
+                        style={styles.exitBtn}
+                        onPress={() => leaveOrEnd(r)}
+                        testID={`leave-room-${r.room_id}`}
+                      >
+                        <Ionicons
+                          name={isOwner ? "trash-outline" : "exit-outline"}
+                          size={18}
+                          color={Colors.danger}
+                        />
+                      </Pressable>
                     </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.roomName}>{r.name}</Text>
-                      <Text style={styles.roomMeta}>
-                        {r.room_type.toUpperCase()} ROOM • TAP TO ENTER
-                      </Text>
-                    </View>
-                    <Ionicons
-                      name="chevron-forward"
-                      size={18}
-                      color={Colors.textTertiary}
-                    />
-                  </Pressable>
-                ))}
+                  );
+                })}
                 <Button
                   label="Try another phrase"
                   icon="refresh-outline"
@@ -398,12 +475,7 @@ const styles = StyleSheet.create({
   headerBtnText: { color: Colors.brandPrimary, fontWeight: "600", fontSize: 13 },
   scroll: { padding: 24, paddingBottom: 64 },
   stage: { alignItems: "center", paddingTop: 12 },
-  greet: {
-    fontSize: 22,
-    fontWeight: "700",
-    color: Colors.textPrimary,
-    letterSpacing: -0.4,
-  },
+  greet: { fontSize: 22, fontWeight: "700", color: Colors.textPrimary, letterSpacing: -0.4 },
   prompt: {
     marginTop: 6,
     fontSize: 13,
@@ -484,12 +556,18 @@ const styles = StyleSheet.create({
     marginTop: 12,
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
-    padding: 16,
     backgroundColor: Colors.paper,
     borderRadius: Radii.xl,
     borderWidth: 1,
     borderColor: Colors.divider2,
+    overflow: "hidden",
+  },
+  roomCardLeft: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    padding: 16,
   },
   roomIcon: {
     width: 44,
@@ -505,5 +583,15 @@ const styles = StyleSheet.create({
     color: Colors.textTertiary,
     letterSpacing: 1.2,
     marginTop: 2,
+  },
+  exitBtn: {
+    width: 56,
+    height: "100%",
+    minHeight: 76,
+    alignItems: "center",
+    justifyContent: "center",
+    borderLeftWidth: 1,
+    borderLeftColor: Colors.divider2,
+    backgroundColor: Colors.dangerBg,
   },
 });

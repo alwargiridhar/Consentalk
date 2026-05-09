@@ -51,6 +51,22 @@ interface RoomData {
   members_detail: Member[];
 }
 
+interface UserBasic {
+  user_id: string;
+  name: string;
+  picture?: string;
+  verified: boolean;
+  country?: string | null;
+  status: string;
+  joined_at?: string;
+}
+
+interface ScreenshotPrompt {
+  request_id: string;
+  user_id: string;
+  name: string;
+}
+
 export default function RoomChat() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
@@ -61,13 +77,22 @@ export default function RoomChat() {
   const [sending, setSending] = useState(false);
   const [recording, setRecording] = useState<Audio.Recording | null>(null);
   const [showInvite, setShowInvite] = useState(false);
-  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteMode, setInviteMode] = useState<"email" | "phone">("email");
+  const [inviteValue, setInviteValue] = useState("");
   const [inviteBusy, setInviteBusy] = useState(false);
   const [endBusy, setEndBusy] = useState(false);
+  const [endedNotice, setEndedNotice] = useState<string | null>(null);
+  const [leftNotices, setLeftNotices] = useState<string[]>([]);
+  const [memberInfo, setMemberInfo] = useState<UserBasic | null>(null);
+  const [memberLoading, setMemberLoading] = useState(false);
   const [audioPlayer, setAudioPlayer] = useState<Audio.Sound | null>(null);
   const [playingId, setPlayingId] = useState<string | null>(null);
+  const [screenshotPrompt, setScreenshotPrompt] = useState<ScreenshotPrompt | null>(
+    null
+  );
   const scrollRef = useRef<ScrollView | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const readSent = useRef<Set<string>>(new Set());
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -89,7 +114,6 @@ export default function RoomChat() {
   // websocket
   useEffect(() => {
     if (!id) return;
-    let alive = true;
     (async () => {
       const token = await getStoredToken();
       if (!token) return;
@@ -105,7 +129,38 @@ export default function RoomChat() {
                 }
                 return [...prev, data.message];
               });
-              setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
+              setTimeout(
+                () => scrollRef.current?.scrollToEnd({ animated: true }),
+                50
+              );
+            } else if (data.type === "deleted" && data.message_id) {
+              setMessages((prev) =>
+                prev.filter((m) => m.message_id !== data.message_id)
+              );
+            } else if (data.type === "ended") {
+              setEndedNotice(`${data.by_name || "Someone"} ended the conversation.`);
+              setMessages([]);
+            } else if (data.type === "left") {
+              if (data.user_id !== user?.user_id) {
+                setLeftNotices((p) => [
+                  ...p,
+                  `${data.by_name || "A member"} left the room.`,
+                ]);
+              }
+            } else if (data.type === "screenshot_request") {
+              if (data.user_id !== user?.user_id) {
+                setScreenshotPrompt({
+                  request_id: data.request_id,
+                  user_id: data.user_id,
+                  name: data.name,
+                });
+              }
+            } else if (data.type === "screenshot_response") {
+              const tag = data.allow ? "allowed" : "declined";
+              setLeftNotices((p) => [
+                ...p,
+                `${data.name || "Member"} ${tag} the screenshot.`,
+              ]);
             }
           } catch {}
         };
@@ -114,12 +169,30 @@ export default function RoomChat() {
       } catch {}
     })();
     return () => {
-      alive = false;
       try {
         wsRef.current?.close();
       } catch {}
     };
-  }, [id]);
+  }, [id, user?.user_id]);
+
+  // mark messages as read (on initial load + when new arrives)
+  useEffect(() => {
+    if (!id || !user?.user_id) return;
+    const toMark = messages.filter(
+      (m) =>
+        m.sender_user_id !== user.user_id &&
+        !readSent.current.has(m.message_id)
+    );
+    if (toMark.length === 0) return;
+    toMark.forEach((m) => readSent.current.add(m.message_id));
+    Promise.all(
+      toMark.map((m) =>
+        api(`/rooms/${id}/messages/${m.message_id}/read`, { method: "POST" }).catch(
+          () => null
+        )
+      )
+    );
+  }, [messages, id, user?.user_id]);
 
   const send = async (override?: { content_type: string; content: string }) => {
     const payload = override ?? { content_type: "text", content: draft.trim() };
@@ -137,6 +210,17 @@ export default function RoomChat() {
       Alert.alert("Couldn't send", e?.message || "Try again");
     } finally {
       setSending(false);
+    }
+  };
+
+  const onInputKeyPress = (e: any) => {
+    // web: Enter without Shift sends; Shift+Enter inserts newline
+    if (Platform.OS === "web" && e?.nativeEvent?.key === "Enter") {
+      const shift = !!(e.nativeEvent as any).shiftKey;
+      if (!shift) {
+        e.preventDefault?.();
+        send();
+      }
     }
   };
 
@@ -220,7 +304,7 @@ export default function RoomChat() {
   const endConversation = () => {
     Alert.alert(
       "End conversation?",
-      "All messages in this room will be wiped immediately. The room will close for everyone here.",
+      "All messages in this room will be wiped immediately. The room will close for everyone.",
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -230,7 +314,9 @@ export default function RoomChat() {
             setEndBusy(true);
             try {
               await api(`/rooms/${id}/end`, { method: "POST" });
-              router.replace("/(tabs)");
+              setMessages([]);
+              setEndedNotice("You ended the conversation. Messages wiped.");
+              setTimeout(() => router.replace("/(tabs)"), 800);
             } catch (e: any) {
               Alert.alert("Couldn't end", e?.message || "Try again");
             } finally {
@@ -243,11 +329,16 @@ export default function RoomChat() {
   };
 
   const sendInvite = async () => {
-    if (!inviteEmail.trim()) return;
+    if (!inviteValue.trim()) return;
     setInviteBusy(true);
     try {
-      await api(`/rooms/${id}/invite`, { body: { email: inviteEmail.trim() } });
-      setInviteEmail("");
+      await api(`/rooms/${id}/invite`, {
+        body:
+          inviteMode === "email"
+            ? { email: inviteValue.trim() }
+            : { phone: inviteValue.trim() },
+      });
+      setInviteValue("");
       setShowInvite(false);
       Alert.alert(
         "Invite sent",
@@ -258,6 +349,51 @@ export default function RoomChat() {
     } finally {
       setInviteBusy(false);
     }
+  };
+
+  const openMember = async (memberId: string) => {
+    setMemberLoading(true);
+    setMemberInfo({
+      user_id: memberId,
+      name: "…",
+      verified: false,
+      status: "active",
+    });
+    try {
+      const u = await api<UserBasic>(`/users/${memberId}`);
+      setMemberInfo(u);
+    } catch (e: any) {
+      setMemberInfo(null);
+      Alert.alert("Couldn't load profile", e?.message || "Try again");
+    } finally {
+      setMemberLoading(false);
+    }
+  };
+
+  const requestScreenshot = () => {
+    if (!wsRef.current || wsRef.current.readyState !== 1) {
+      Alert.alert("Not connected — please retry");
+      return;
+    }
+    const requestId = `ss_${Date.now()}`;
+    wsRef.current.send(
+      JSON.stringify({ type: "screenshot_request", request_id: requestId })
+    );
+    setLeftNotices((p) => [...p, "You asked others to allow a screenshot."]);
+  };
+
+  const respondScreenshot = (allow: boolean) => {
+    if (!screenshotPrompt) return;
+    if (wsRef.current?.readyState === 1) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: "screenshot_response",
+          request_id: screenshotPrompt.request_id,
+          allow,
+        })
+      );
+    }
+    setScreenshotPrompt(null);
   };
 
   const isOwner = room && room.owner_user_id === user?.user_id;
@@ -287,13 +423,28 @@ export default function RoomChat() {
               </Text>
             </View>
             <View style={{ flexDirection: "row", gap: 6 }}>
+              <Pressable
+                testID="screenshot-btn"
+                style={styles.iconBtn}
+                onPress={requestScreenshot}
+              >
+                <Ionicons
+                  name="camera-outline"
+                  size={18}
+                  color={Colors.textSecondary}
+                />
+              </Pressable>
               {isOwner ? (
                 <Pressable
                   testID="invite-btn"
                   style={styles.iconBtn}
                   onPress={() => setShowInvite(true)}
                 >
-                  <Ionicons name="person-add-outline" size={18} color={Colors.brandPrimary} />
+                  <Ionicons
+                    name="person-add-outline"
+                    size={18}
+                    color={Colors.brandPrimary}
+                  />
                 </Pressable>
               ) : null}
               <Pressable
@@ -316,9 +467,32 @@ export default function RoomChat() {
             <View style={styles.banner} testID="ephemeral-banner">
               <Ionicons name="time-outline" size={14} color={Colors.brandPrimary} />
               <Text style={styles.bannerText}>
-                Messages disappear when this conversation ends.
+                Messages auto-delete once read by everyone.
               </Text>
             </View>
+
+            {leftNotices.map((n, i) => (
+              <View key={`note-${i}`} style={styles.systemBubble}>
+                <Text style={styles.systemText}>{n}</Text>
+              </View>
+            ))}
+
+            {endedNotice ? (
+              <View style={styles.endedBox} testID="ended-banner">
+                <Ionicons
+                  name="cloud-offline-outline"
+                  size={20}
+                  color={Colors.danger}
+                />
+                <Text style={styles.endedText}>{endedNotice}</Text>
+                <Pressable
+                  onPress={() => router.replace("/(tabs)")}
+                  style={styles.endedBtn}
+                >
+                  <Text style={styles.endedBtnText}>Return home</Text>
+                </Pressable>
+              </View>
+            ) : null}
 
             {messages.map((m) => {
               const me = m.sender_user_id === user?.user_id;
@@ -332,7 +506,11 @@ export default function RoomChat() {
                   testID={`msg-${m.message_id}`}
                 >
                   {!me && (
-                    <View style={styles.avatarSm}>
+                    <Pressable
+                      onPress={() => openMember(m.sender_user_id)}
+                      style={styles.avatarSm}
+                      testID={`avatar-${m.sender_user_id}`}
+                    >
                       {m.sender_picture ? (
                         <Image
                           source={{ uri: m.sender_picture }}
@@ -345,7 +523,7 @@ export default function RoomChat() {
                           color={Colors.textSecondary}
                         />
                       )}
-                    </View>
+                    </Pressable>
                   )}
                   <View
                     style={[
@@ -354,7 +532,9 @@ export default function RoomChat() {
                     ]}
                   >
                     {!me && (
-                      <Text style={styles.bubbleSender}>{m.sender_name}</Text>
+                      <Pressable onPress={() => openMember(m.sender_user_id)}>
+                        <Text style={styles.bubbleSender}>{m.sender_name}</Text>
+                      </Pressable>
                     )}
                     {m.content_type === "text" ? (
                       <Text
@@ -384,9 +564,7 @@ export default function RoomChat() {
                         onPress={() => playVoice(m)}
                       >
                         <Ionicons
-                          name={
-                            playingId === m.message_id ? "pause" : "play"
-                          }
+                          name={playingId === m.message_id ? "pause" : "play"}
                           size={16}
                           color={me ? "#FFFFFF" : Colors.brandPrimary}
                         />
@@ -407,11 +585,7 @@ export default function RoomChat() {
           </ScrollView>
 
           <View style={styles.composer}>
-            <Pressable
-              testID="image-btn"
-              style={styles.compIcon}
-              onPress={pickImage}
-            >
+            <Pressable testID="image-btn" style={styles.compIcon} onPress={pickImage}>
               <Ionicons name="image-outline" size={20} color={Colors.brandPrimary} />
             </Pressable>
             <View style={styles.inputWrap}>
@@ -422,7 +596,11 @@ export default function RoomChat() {
                 onChangeText={setDraft}
                 placeholder="Speak gently…"
                 placeholderTextColor={Colors.textTertiary}
-                multiline
+                multiline={Platform.OS !== "web"}
+                onKeyPress={onInputKeyPress}
+                onSubmitEditing={() => send()}
+                returnKeyType="send"
+                blurOnSubmit={false}
               />
             </View>
             <Pressable
@@ -451,22 +629,76 @@ export default function RoomChat() {
           </View>
         </KeyboardAvoidingView>
 
+        {/* Invite modal */}
         <Modal visible={showInvite} animationType="slide" transparent>
           <View style={styles.modalRoot}>
             <View style={styles.modalCard}>
               <Text style={styles.modalTitle}>Invite a member</Text>
               <Text style={styles.modalHint}>
-                Enter their email. They will see an invitation in their app.
+                Send by email or by mobile number. They'll see an invitation in their
+                app and can join with the phrase + PIN.
               </Text>
+              <View style={styles.tabRow}>
+                <Pressable
+                  onPress={() => setInviteMode("email")}
+                  style={[styles.tabBtn, inviteMode === "email" && styles.tabBtnActive]}
+                  testID="invite-mode-email"
+                >
+                  <Ionicons
+                    name="mail-outline"
+                    size={16}
+                    color={
+                      inviteMode === "email"
+                        ? Colors.brandDeep
+                        : Colors.textSecondary
+                    }
+                  />
+                  <Text
+                    style={[
+                      styles.tabBtnText,
+                      inviteMode === "email" && { color: Colors.brandDeep },
+                    ]}
+                  >
+                    Email
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => setInviteMode("phone")}
+                  style={[styles.tabBtn, inviteMode === "phone" && styles.tabBtnActive]}
+                  testID="invite-mode-phone"
+                >
+                  <Ionicons
+                    name="call-outline"
+                    size={16}
+                    color={
+                      inviteMode === "phone"
+                        ? Colors.brandDeep
+                        : Colors.textSecondary
+                    }
+                  />
+                  <Text
+                    style={[
+                      styles.tabBtnText,
+                      inviteMode === "phone" && { color: Colors.brandDeep },
+                    ]}
+                  >
+                    Mobile
+                  </Text>
+                </Pressable>
+              </View>
               <TextInput
-                value={inviteEmail}
-                onChangeText={setInviteEmail}
-                placeholder="friend@example.com"
+                value={inviteValue}
+                onChangeText={setInviteValue}
+                placeholder={
+                  inviteMode === "email" ? "friend@example.com" : "+1 555 555 1234"
+                }
                 placeholderTextColor={Colors.textTertiary}
                 style={styles.input2}
                 autoCapitalize="none"
-                keyboardType="email-address"
-                testID="invite-email-input"
+                keyboardType={
+                  inviteMode === "email" ? "email-address" : "phone-pad"
+                }
+                testID="invite-value-input"
               />
               <View style={{ flexDirection: "row", gap: 10 }}>
                 <Pressable
@@ -490,6 +722,156 @@ export default function RoomChat() {
                       Send invite
                     </Text>
                   )}
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        </Modal>
+
+        {/* Member info modal */}
+        <Modal
+          visible={!!memberInfo}
+          animationType="fade"
+          transparent
+          onRequestClose={() => setMemberInfo(null)}
+        >
+          <Pressable
+            style={styles.modalRoot}
+            onPress={() => setMemberInfo(null)}
+          >
+            <Pressable style={styles.memberCard} onPress={(e) => e.stopPropagation()}>
+              <Pressable
+                style={styles.closeBtnTop}
+                onPress={() => setMemberInfo(null)}
+                testID="close-member"
+              >
+                <Ionicons name="close" size={20} color={Colors.textSecondary} />
+              </Pressable>
+              <View style={{ alignItems: "center" }}>
+                {memberLoading ? (
+                  <ActivityIndicator color={Colors.brandPrimary} />
+                ) : memberInfo?.picture ? (
+                  <Image
+                    source={{ uri: memberInfo.picture }}
+                    style={styles.memberPic}
+                  />
+                ) : (
+                  <View style={[styles.memberPic, styles.memberPicFallback]}>
+                    <Ionicons
+                      name="person-outline"
+                      size={32}
+                      color="#FFFFFF"
+                    />
+                  </View>
+                )}
+                <Text style={styles.memberName} testID="member-name">
+                  {memberInfo?.name || "…"}
+                </Text>
+                <View style={styles.memberMetaRow}>
+                  {memberInfo?.verified ? (
+                    <View style={[styles.memberPill, { backgroundColor: Colors.successBg }]}>
+                      <Ionicons
+                        name="checkmark-circle"
+                        size={12}
+                        color={Colors.success}
+                      />
+                      <Text style={[styles.memberPillText, { color: Colors.success }]}>
+                        VERIFIED
+                      </Text>
+                    </View>
+                  ) : (
+                    <View style={[styles.memberPill, { backgroundColor: Colors.divider2 }]}>
+                      <Text
+                        style={[styles.memberPillText, { color: Colors.textSecondary }]}
+                      >
+                        UNVERIFIED
+                      </Text>
+                    </View>
+                  )}
+                  {memberInfo?.country ? (
+                    <View
+                      style={[styles.memberPill, { backgroundColor: Colors.brandFog }]}
+                    >
+                      <Ionicons
+                        name="flag-outline"
+                        size={12}
+                        color={Colors.brandDeep}
+                      />
+                      <Text style={[styles.memberPillText, { color: Colors.brandDeep }]}>
+                        {memberInfo.country.toUpperCase()}
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+                <Text style={styles.memberHint}>
+                  {memberInfo?.verified
+                    ? "This member has completed identity verification."
+                    : "This member has not yet verified their identity."}
+                </Text>
+                <View style={styles.memberActions}>
+                  <Pressable
+                    style={[styles.memberAct, { backgroundColor: Colors.dangerBg }]}
+                    testID="member-report"
+                    onPress={() => {
+                      const id = memberInfo?.user_id;
+                      setMemberInfo(null);
+                      if (id) router.push(`/report?user_id=${id}`);
+                    }}
+                  >
+                    <Ionicons
+                      name="alert-circle-outline"
+                      size={16}
+                      color={Colors.danger}
+                    />
+                    <Text style={[styles.memberActText, { color: Colors.danger }]}>
+                      Report
+                    </Text>
+                  </Pressable>
+                </View>
+              </View>
+            </Pressable>
+          </Pressable>
+        </Modal>
+
+        {/* Screenshot consent prompt */}
+        <Modal
+          visible={!!screenshotPrompt}
+          animationType="fade"
+          transparent
+          onRequestClose={() => respondScreenshot(false)}
+        >
+          <View style={styles.modalRoot}>
+            <View style={styles.memberCard}>
+              <View style={[styles.iconHero, { backgroundColor: Colors.warnBg }]}>
+                <Ionicons
+                  name="camera-outline"
+                  size={28}
+                  color={Colors.warn}
+                />
+              </View>
+              <Text style={styles.modalTitle}>
+                {screenshotPrompt?.name || "A member"} wants to take a screenshot
+              </Text>
+              <Text style={styles.modalHint}>
+                Consentalk asks every member to consent before screenshots are taken.
+                If you decline, they should not capture this conversation.
+              </Text>
+              <View style={{ flexDirection: "row", gap: 10, marginTop: 16 }}>
+                <Pressable
+                  style={[styles.modalBtn, styles.modalCancel]}
+                  onPress={() => respondScreenshot(false)}
+                  testID="screenshot-decline"
+                >
+                  <Text style={{ color: Colors.textSecondary, fontWeight: "600" }}>
+                    Decline
+                  </Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.modalBtn, { backgroundColor: Colors.brandPrimary }]}
+                  onPress={() => respondScreenshot(true)}
+                  testID="screenshot-allow"
+                >
+                  <Text style={{ color: "#FFFFFF", fontWeight: "700" }}>Allow</Text>
                 </Pressable>
               </View>
             </View>
@@ -545,6 +927,35 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   bannerText: { color: Colors.brandDeep, fontSize: 11, fontWeight: "600" },
+  systemBubble: {
+    alignSelf: "center",
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    backgroundColor: Colors.divider2,
+    borderRadius: Radii.pill,
+  },
+  systemText: { fontSize: 11, color: Colors.textSecondary, fontStyle: "italic" },
+  endedBox: {
+    alignSelf: "center",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: 8,
+    padding: 16,
+    margin: 8,
+    backgroundColor: Colors.dangerBg,
+    borderRadius: Radii.lg,
+    borderWidth: 1,
+    borderColor: "#FECACA",
+  },
+  endedText: { color: Colors.danger, fontWeight: "600", fontSize: 14, textAlign: "center" },
+  endedBtn: {
+    marginTop: 4,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    backgroundColor: Colors.danger,
+    borderRadius: Radii.pill,
+  },
+  endedBtnText: { color: "#FFFFFF", fontWeight: "700", fontSize: 12 },
   msgRow: { flexDirection: "row", alignItems: "flex-end", gap: 8, marginVertical: 4 },
   avatarSm: {
     width: 28,
@@ -615,7 +1026,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 6,
   },
-  input: { fontSize: 15, color: Colors.textPrimary, maxHeight: 96 },
+  input: { fontSize: 15, color: Colors.textPrimary, maxHeight: 96, outlineStyle: "none" } as any,
   sendBtn: {
     width: 44,
     height: 44,
@@ -627,17 +1038,34 @@ const styles = StyleSheet.create({
   modalRoot: {
     flex: 1,
     backgroundColor: "rgba(15,23,42,0.4)",
-    justifyContent: "flex-end",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 16,
   },
   modalCard: {
+    width: "100%",
     backgroundColor: Colors.paper,
     padding: 24,
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
+    borderRadius: 24,
     gap: 12,
   },
   modalTitle: { fontSize: 18, fontWeight: "700", color: Colors.textPrimary },
-  modalHint: { color: Colors.textSecondary, fontSize: 13 },
+  modalHint: { color: Colors.textSecondary, fontSize: 13, lineHeight: 19 },
+  tabRow: { flexDirection: "row", gap: 8 },
+  tabBtn: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingVertical: 10,
+    backgroundColor: Colors.bg,
+    borderRadius: Radii.pill,
+    borderWidth: 1,
+    borderColor: Colors.divider,
+  },
+  tabBtnActive: { backgroundColor: Colors.brandFog, borderColor: "#7DD3FC" },
+  tabBtnText: { color: Colors.textSecondary, fontWeight: "600", fontSize: 13 },
   input2: {
     height: 52,
     backgroundColor: Colors.bg,
@@ -656,4 +1084,67 @@ const styles = StyleSheet.create({
   },
   modalCancel: { backgroundColor: Colors.bg, borderWidth: 1, borderColor: Colors.divider },
   modalConfirm: { backgroundColor: Colors.brandPrimary },
+  memberCard: {
+    width: "100%",
+    maxWidth: 360,
+    backgroundColor: Colors.paper,
+    borderRadius: 28,
+    padding: 24,
+    paddingTop: 32,
+  },
+  closeBtnTop: {
+    position: "absolute",
+    top: 12,
+    right: 12,
+    width: 32,
+    height: 32,
+    borderRadius: 32,
+    backgroundColor: Colors.bg,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  iconHero: {
+    width: 56,
+    height: 56,
+    borderRadius: 56,
+    alignSelf: "center",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 6,
+  },
+  memberPic: { width: 88, height: 88, borderRadius: 88, backgroundColor: Colors.divider2 },
+  memberPicFallback: {
+    backgroundColor: Colors.brandPrimary,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  memberName: { fontSize: 20, fontWeight: "700", color: Colors.textPrimary, marginTop: 12 },
+  memberMetaRow: { flexDirection: "row", gap: 8, marginTop: 10, flexWrap: "wrap", justifyContent: "center" },
+  memberPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: Radii.pill,
+  },
+  memberPillText: { fontSize: 10, fontWeight: "700", letterSpacing: 0.6 },
+  memberHint: {
+    color: Colors.textSecondary,
+    fontSize: 13,
+    textAlign: "center",
+    marginTop: 12,
+    paddingHorizontal: 8,
+    lineHeight: 19,
+  },
+  memberActions: { flexDirection: "row", gap: 10, marginTop: 18 },
+  memberAct: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: Radii.pill,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  memberActText: { fontSize: 13, fontWeight: "600" },
 });

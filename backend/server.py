@@ -122,6 +122,15 @@ class VerificationInput(BaseModel):
     consent_acknowledged: bool
 
 
+class PhoneOtpRequest(BaseModel):
+    phone: str
+
+
+class PhoneOtpVerify(BaseModel):
+    phone: str
+    code: str
+
+
 class CreateRoomInput(BaseModel):
     name: str
     phrase: str
@@ -135,7 +144,8 @@ class SummonRoomInput(BaseModel):
 
 
 class InviteInput(BaseModel):
-    email: str
+    email: Optional[str] = None
+    phone: Optional[str] = None
 
 
 class MessageInput(BaseModel):
@@ -329,6 +339,17 @@ async def submit_verification(
         raise HTTPException(status_code=400, detail="Consent acknowledgement required")
     if not payload.full_legal_name.strip() or not payload.phone.strip():
         raise HTTPException(status_code=400, detail="Name and phone are required")
+    # phone must be OTP-verified before this endpoint sets verified=True
+    phone_norm = payload.phone.strip()
+    otp_record = await db.phone_otps.find_one(
+        {"user_id": user.user_id, "phone": phone_norm, "verified": True},
+        {"_id": 0},
+    )
+    if not otp_record:
+        raise HTTPException(
+            status_code=400,
+            detail="Phone not verified. Please request and confirm an OTP first.",
+        )
     await db.users.update_one(
         {"user_id": user.user_id},
         {
@@ -338,7 +359,8 @@ async def submit_verification(
                     "full_legal_name": payload.full_legal_name.strip(),
                     "date_of_birth": payload.date_of_birth.strip(),
                     "country": payload.country.strip(),
-                    "phone": payload.phone.strip(),
+                    "phone": phone_norm,
+                    "phone_verified": True,
                     "verified_at": utcnow().isoformat(),
                 },
             }
@@ -346,6 +368,53 @@ async def submit_verification(
     )
     user_doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
     return User(**user_doc)
+
+
+# Phone OTP — MOCKED (dev returns the code, real prod would send SMS via Twilio).
+@api_router.post("/profile/phone/request-otp")
+async def request_phone_otp(payload: PhoneOtpRequest, user: User = Depends(get_current_user)):
+    phone = payload.phone.strip()
+    if len(phone) < 6:
+        raise HTTPException(status_code=400, detail="Invalid phone number")
+    code = f"{int.from_bytes(os.urandom(3), 'big') % 1000000:06d}"
+    await db.phone_otps.update_one(
+        {"user_id": user.user_id, "phone": phone},
+        {
+            "$set": {
+                "user_id": user.user_id,
+                "phone": phone,
+                "code": code,
+                "verified": False,
+                "expires_at": utcnow() + timedelta(minutes=10),
+                "created_at": utcnow(),
+            }
+        },
+        upsert=True,
+    )
+    # MOCKED: in production this sends SMS. For MVP we surface the code in the
+    # response so the user can complete the flow without an SMS provider.
+    return {"ok": True, "dev_code": code, "mocked": True}
+
+
+@api_router.post("/profile/phone/verify-otp")
+async def verify_phone_otp(payload: PhoneOtpVerify, user: User = Depends(get_current_user)):
+    rec = await db.phone_otps.find_one(
+        {"user_id": user.user_id, "phone": payload.phone.strip()}, {"_id": 0}
+    )
+    if not rec:
+        raise HTTPException(status_code=404, detail="No OTP requested for this phone")
+    expires = rec.get("expires_at")
+    if expires and expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    if expires and expires < utcnow():
+        raise HTTPException(status_code=400, detail="OTP expired — request a new one")
+    if (rec.get("code") or "") != payload.code.strip():
+        raise HTTPException(status_code=400, detail="Incorrect OTP")
+    await db.phone_otps.update_one(
+        {"user_id": user.user_id, "phone": payload.phone.strip()},
+        {"$set": {"verified": True, "verified_at": utcnow()}},
+    )
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -464,7 +533,19 @@ async def invite_to_room(
     if room["room_type"] == "circle" and len(room.get("members", [])) >= 8:
         raise HTTPException(status_code=400, detail="Circle rooms accept up to 8 members")
 
-    invitee = await db.users.find_one({"email": payload.email.lower()}, {"_id": 0})
+    invite_email = (payload.email or "").strip().lower() or None
+    invite_phone = (payload.phone or "").strip() or None
+    if not invite_email and not invite_phone:
+        raise HTTPException(status_code=400, detail="Provide email or phone")
+
+    invitee = None
+    if invite_email:
+        invitee = await db.users.find_one({"email": invite_email}, {"_id": 0})
+    if not invitee and invite_phone:
+        invitee = await db.users.find_one(
+            {"verification_data.phone": invite_phone}, {"_id": 0}
+        )
+
     invitation_id = f"inv_{uuid.uuid4().hex[:12]}"
     await db.invitations.insert_one(
         {
@@ -474,7 +555,8 @@ async def invite_to_room(
             "room_type": room.get("room_type"),
             "inviter_user_id": user.user_id,
             "inviter_name": user.name,
-            "invited_email": payload.email.lower(),
+            "invited_email": invite_email,
+            "invited_phone": invite_phone,
             "invited_user_id": invitee["user_id"] if invitee else None,
             "status": "pending",
             "created_at": utcnow(),
@@ -485,14 +567,18 @@ async def invite_to_room(
 
 @api_router.get("/rooms/invitations")
 async def my_invitations(user: User = Depends(get_current_user)):
+    user_phone = None
+    full = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
+    if full and full.get("verification_data"):
+        user_phone = full["verification_data"].get("phone")
+    or_clauses: List[Dict[str, Any]] = [
+        {"invited_user_id": user.user_id},
+        {"invited_email": user.email.lower()},
+    ]
+    if user_phone:
+        or_clauses.append({"invited_phone": user_phone})
     cursor = db.invitations.find(
-        {
-            "$or": [
-                {"invited_user_id": user.user_id},
-                {"invited_email": user.email.lower()},
-            ],
-            "status": "pending",
-        },
+        {"$or": or_clauses, "status": "pending"},
         {"_id": 0},
     ).sort("created_at", -1)
     items = await cursor.to_list(100)
@@ -603,7 +689,127 @@ async def end_room_session(room_id: str, user: User = Depends(get_current_user))
             }
         },
     )
+    # broadcast end-of-conversation to other connected clients so they wipe
+    # their local state and show "{name} left." notice.
+    await ws_manager.broadcast(
+        room_id,
+        {
+            "type": "ended",
+            "by_user_id": user.user_id,
+            "by_name": user.name,
+        },
+    )
     return {"ok": True, "wiped": True}
+
+
+@api_router.post("/rooms/{room_id}/leave")
+async def leave_room(room_id: str, user: User = Depends(get_current_user)):
+    """Remove caller from members. If owner leaves, room is permanently closed."""
+    room = await db.rooms.find_one({"room_id": room_id, "members": user.user_id}, {"_id": 0})
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    is_owner = room.get("owner_user_id") == user.user_id
+    if is_owner:
+        # close the room and wipe like end-conversation
+        msgs = await db.messages.find({"room_id": room_id}, {"_id": 0}).to_list(2000)
+        if msgs:
+            expiry = utcnow() + timedelta(days=FORENSIC_RETENTION_DAYS)
+            await db.forensic_fragments.insert_many([
+                {
+                    "fragment_id": f"frag_{uuid.uuid4().hex[:12]}",
+                    "room_id": room_id,
+                    "encrypted_blob": encrypt_fragment(
+                        f"[{m.get('content_type')}] {m.get('sender_user_id')}: "
+                        f"{m.get('content','')[:200]}"
+                    ),
+                    "created_at": m.get("created_at", utcnow()),
+                    "expires_at": expiry,
+                    "ended_by": user.user_id,
+                }
+                for m in msgs
+            ])
+        await db.messages.delete_many({"room_id": room_id})
+        await db.rooms.update_one(
+            {"room_id": room_id},
+            {"$set": {"status": "ended", "session_active": False, "last_ended_at": utcnow(), "last_ended_by": user.user_id}},
+        )
+        await ws_manager.broadcast(
+            room_id,
+            {"type": "ended", "by_user_id": user.user_id, "by_name": user.name, "permanent": True},
+        )
+    else:
+        await db.rooms.update_one(
+            {"room_id": room_id}, {"$pull": {"members": user.user_id}}
+        )
+        await ws_manager.broadcast(
+            room_id,
+            {
+                "type": "left",
+                "by_user_id": user.user_id,
+                "by_name": user.name,
+            },
+        )
+    return {"ok": True, "owner": is_owner}
+
+
+@api_router.post("/rooms/{room_id}/messages/{message_id}/read")
+async def mark_message_read(
+    room_id: str, message_id: str, user: User = Depends(get_current_user)
+):
+    """Mark a message as read by the caller. When all OTHER members have read,
+    the message is wiped from storage and a delete event is broadcast."""
+    room = await db.rooms.find_one({"room_id": room_id, "members": user.user_id}, {"_id": 0})
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    msg = await db.messages.find_one({"message_id": message_id, "room_id": room_id}, {"_id": 0})
+    if not msg:
+        return {"ok": True, "already_deleted": True}
+    if msg.get("sender_user_id") == user.user_id:
+        # readers do not include the sender
+        return {"ok": True, "self": True}
+    await db.messages.update_one(
+        {"message_id": message_id, "room_id": room_id},
+        {"$addToSet": {"read_by": user.user_id}},
+    )
+    msg = await db.messages.find_one({"message_id": message_id, "room_id": room_id}, {"_id": 0})
+    if not msg:
+        return {"ok": True}
+    other_members = [
+        m for m in room.get("members", []) if m != msg.get("sender_user_id")
+    ]
+    read_by = set(msg.get("read_by") or [])
+    if other_members and read_by.issuperset(other_members):
+        await db.messages.delete_one({"message_id": message_id, "room_id": room_id})
+        await ws_manager.broadcast(
+            room_id, {"type": "deleted", "message_id": message_id}
+        )
+    return {"ok": True}
+
+
+@api_router.get("/users/{user_id}")
+async def get_user_basic(user_id: str, user: User = Depends(get_current_user)):
+    """Basic user info — accessible to anyone in a shared room."""
+    target = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    # only allow if the requester shares at least one active room with target
+    shared = await db.rooms.find_one(
+        {"members": {"$all": [user.user_id, user_id]}}, {"_id": 0}
+    )
+    if not shared and user.user_id != user_id and user.role not in ("admin", "super_admin"):
+        raise HTTPException(status_code=403, detail="Not in a shared room")
+    vd = target.get("verification_data") or {}
+    return {
+        "user_id": target["user_id"],
+        "name": target.get("name"),
+        "picture": target.get("picture"),
+        "verified": target.get("verified", False),
+        "country": vd.get("country") if target.get("verified") else None,
+        "joined_at": target.get("created_at").isoformat()
+        if isinstance(target.get("created_at"), datetime)
+        else target.get("created_at"),
+        "status": target.get("status", "active"),
+    }
 
 
 @api_router.get("/rooms/{room_id}/messages")
@@ -922,6 +1128,28 @@ async def websocket_room(websocket: WebSocket, room_id: str, token: str = ""):
                         "type": "typing",
                         "user_id": user_doc["user_id"],
                         "name": user_doc.get("name"),
+                    },
+                )
+            elif kind == "screenshot_request":
+                # Manual consent flow — sender announces intent, others may allow/deny.
+                await ws_manager.broadcast(
+                    room_id,
+                    {
+                        "type": "screenshot_request",
+                        "user_id": user_doc["user_id"],
+                        "name": user_doc.get("name"),
+                        "request_id": data.get("request_id", ""),
+                    },
+                )
+            elif kind == "screenshot_response":
+                await ws_manager.broadcast(
+                    room_id,
+                    {
+                        "type": "screenshot_response",
+                        "user_id": user_doc["user_id"],
+                        "name": user_doc.get("name"),
+                        "request_id": data.get("request_id", ""),
+                        "allow": bool(data.get("allow")),
                     },
                 )
     except WebSocketDisconnect:
