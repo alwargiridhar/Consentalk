@@ -370,6 +370,31 @@ export default function AdminDashboard() {
               </View>
             ))}
 
+          {tab === "billing" && (
+            <BillingTab
+              users={premiumUsers}
+              events={billingEvents}
+              onGrant={grantPremium}
+              onRevoke={revokePremium}
+              isSuper={isSuper}
+            />
+          )}
+
+          {tab === "roles" && (
+            <RolesTab
+              roles={customRoles}
+              perms={permCatalog}
+              users={users}
+              isSuper={isSuper}
+              onCreated={load}
+              onAssigned={load}
+            />
+          )}
+
+          {tab === "analytics" && analytics && (
+            <AnalyticsTab data={analytics} />
+          )}
+
           {(tab === "users" && users.length === 0) ||
           (tab === "reports" && reports.length === 0) ||
           (tab === "forensic" && fragments.length === 0) ||
