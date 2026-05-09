@@ -16,11 +16,11 @@ export default function Root({ children }: PropsWithChildren) {
         <link
           rel="icon"
           type="image/png"
-          href="https://customer-assets.emergentagent.com/job_intent-space-1/artifacts/1l50hp1h_18042944-d84f-4288-ad95-dc48f147d6ae.png"
+          href="https://customer-assets.emergentagent.com/job_intent-space-1/artifacts/wzebcqcn_New%20Project%20%2810%29.png"
         />
         <link
           rel="apple-touch-icon"
-          href="https://customer-assets.emergentagent.com/job_intent-space-1/artifacts/1l50hp1h_18042944-d84f-4288-ad95-dc48f147d6ae.png"
+          href="https://customer-assets.emergentagent.com/job_intent-space-1/artifacts/wzebcqcn_New%20Project%20%2810%29.png"
         />
         <meta name="theme-color" content="#0EA5E9" />
         <meta

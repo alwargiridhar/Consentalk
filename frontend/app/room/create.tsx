@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import {
   View,
   Text,
@@ -8,38 +8,47 @@ import {
   Platform,
   ScrollView,
   Pressable,
-  Alert,
+  ActivityIndicator,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { Audio } from "expo-av";
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import AmbientBackground from "../../src/components/AmbientBackground";
 import Button from "../../src/components/Button";
 import PinDots from "../../src/components/PinDots";
 import { Colors, Radii } from "../../src/lib/theme";
-import { api } from "../../src/lib/api";
+import { api, backendUrl, getStoredToken } from "../../src/lib/api";
+import { useConfirm } from "../../src/contexts/ConfirmContext";
+import { startWebRecorder, blobFilename, WebRecorder } from "../../src/lib/webRecorder";
 
 type Step = "name" | "phrase" | "pin" | "type" | "review";
 type RoomType = "duo" | "circle";
 
 export default function CreateRoom() {
   const router = useRouter();
+  const { notify } = useConfirm();
   const [step, setStep] = useState<Step>("name");
   const [name, setName] = useState("");
   const [phrase, setPhrase] = useState("");
   const [pin, setPin] = useState("");
   const [roomType, setRoomType] = useState<RoomType>("duo");
   const [busy, setBusy] = useState(false);
+  // Voice phrase recording
+  const [recording, setRecording] = useState<Audio.Recording | null>(null);
+  const webRecRef = useRef<WebRecorder | null>(null);
+  const [webRecording, setWebRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
 
-  const next = () => {
+  const next = async () => {
     if (step === "name") {
-      if (name.trim().length < 2) return Alert.alert("Add a room name");
+      if (name.trim().length < 2) return notify("Add a room name");
       setStep("phrase");
     } else if (step === "phrase") {
-      if (phrase.trim().length < 3) return Alert.alert("Phrase too short");
+      if (phrase.trim().length < 3) return notify("Phrase too short");
       setStep("pin");
     } else if (step === "pin") {
-      if (pin.length < 4) return Alert.alert("PIN must be 4–6 digits");
+      if (pin.length < 4) return notify("PIN must be 4–6 digits");
       setStep("type");
     } else if (step === "type") {
       setStep("review");
@@ -60,20 +69,110 @@ export default function CreateRoom() {
       const r = await api<{ room_id: string; name: string }>("/rooms/create", {
         body: { name, phrase, pin, room_type: roomType },
       });
-      Alert.alert(
+      await notify(
         "Room created",
-        "Share the phrase + PIN with the people you trust. They will only see the room when they speak the phrase.",
-        [
-          {
-            text: "Done",
-            onPress: () => router.replace(`/room/${r.room_id}`),
-          },
-        ]
+        "Share the phrase + PIN with the people you trust. They will only see the room when they speak the phrase."
       );
+      router.replace(`/room/${r.room_id}`);
     } catch (e: any) {
-      Alert.alert("Could not create room", e?.message || "Try again");
+      await notify("Could not create room", e?.message || "Try again");
     } finally {
       setBusy(false);
+    }
+  };
+
+  const startVoice = async () => {
+    if (Platform.OS === "web") {
+      try {
+        const rec = await startWebRecorder();
+        webRecRef.current = rec;
+        setWebRecording(true);
+      } catch (e: any) {
+        await notify(
+          "Microphone unavailable",
+          e?.message || "Please type the phrase instead."
+        );
+      }
+      return;
+    }
+    try {
+      const perm = await Audio.requestPermissionsAsync();
+      if (!perm.granted) {
+        await notify("Permission denied", "Please type the phrase instead.");
+        return;
+      }
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+      const rec = new Audio.Recording();
+      await rec.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      await rec.startAsync();
+      setRecording(rec);
+    } catch (e: any) {
+      await notify("Could not start recording", e?.message || "Try again");
+    }
+  };
+
+  const stopVoiceAndTranscribe = async () => {
+    setTranscribing(true);
+    try {
+      let blob: Blob | null = null;
+      let filename = "phrase.m4a";
+      if (Platform.OS === "web" && webRecRef.current) {
+        const rec = webRecRef.current;
+        webRecRef.current = null;
+        setWebRecording(false);
+        blob = await rec.stop();
+        filename = blobFilename(blob);
+      } else if (recording) {
+        await recording.stopAndUnloadAsync();
+        const uri = recording.getURI();
+        setRecording(null);
+        if (!uri) throw new Error("No recording URI");
+        const form = new FormData();
+        // @ts-ignore RN file payload
+        form.append("file", { uri, name: "phrase.m4a", type: "audio/m4a" } as any);
+        const token = await getStoredToken();
+        const res = await fetch(`${backendUrl()}/api/voice/transcribe`, {
+          method: "POST",
+          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+          body: form,
+        });
+        if (!res.ok) throw new Error(`Transcription failed (${res.status})`);
+        const j = (await res.json()) as { text?: string };
+        const text = (j.text || "").trim();
+        if (text) setPhrase(text);
+        else await notify("Could not detect phrase", "Please type instead.");
+        return;
+      } else {
+        return;
+      }
+      const form = new FormData();
+      form.append("file", blob, filename);
+      const token = await getStoredToken();
+      const res = await fetch(`${backendUrl()}/api/voice/transcribe`, {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        body: form,
+      });
+      if (!res.ok) throw new Error(`Transcription failed (${res.status})`);
+      const j = (await res.json()) as { text?: string };
+      const text = (j.text || "").trim();
+      if (text) setPhrase(text);
+      else await notify("Could not detect phrase", "Please type instead.");
+    } catch (e: any) {
+      await notify("Transcription failed", e?.message || "Please type instead.");
+    } finally {
+      setTranscribing(false);
+    }
+  };
+
+  const onMicTap = async () => {
+    if (recording || webRecording) {
+      await stopVoiceAndTranscribe();
+    } else {
+      await startVoice();
     }
   };
 
@@ -86,6 +185,7 @@ export default function CreateRoom() {
     setPin((p) => p + digit);
   };
   const pinKeys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "", "0", "back"];
+  const isRecording = !!recording || webRecording;
 
   return (
     <AmbientBackground>
@@ -138,18 +238,46 @@ export default function CreateRoom() {
                 <Text style={styles.cardTitle}>Step 2 / 4 — Phrase</Text>
                 <Text style={styles.cardHint}>
                   Pick a calm, memorable phrase. The room will only appear when you
-                  speak or type it.
+                  speak or type it. You can record your voice or type it.
                 </Text>
-                <TextInput
-                  testID="room-phrase-input"
-                  value={phrase}
-                  onChangeText={setPhrase}
-                  placeholder="e.g. silver ocean tonight"
-                  placeholderTextColor={Colors.textTertiary}
-                  style={styles.input}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                />
+                <View style={styles.phraseRow}>
+                  <TextInput
+                    testID="room-phrase-input"
+                    value={phrase}
+                    onChangeText={setPhrase}
+                    placeholder={transcribing ? "Transcribing…" : "e.g. silver ocean tonight"}
+                    placeholderTextColor={Colors.textTertiary}
+                    style={[styles.input, { flex: 1 }]}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    editable={!transcribing}
+                  />
+                  <Pressable
+                    testID="phrase-mic-btn"
+                    onPress={onMicTap}
+                    disabled={transcribing}
+                    style={[
+                      styles.micBtn,
+                      isRecording && styles.micBtnActive,
+                      transcribing && { opacity: 0.5 },
+                    ]}
+                  >
+                    {transcribing ? (
+                      <ActivityIndicator color={Colors.brandPrimary} />
+                    ) : (
+                      <Ionicons
+                        name={isRecording ? "stop-circle" : "mic"}
+                        size={22}
+                        color={isRecording ? Colors.danger : Colors.brandPrimary}
+                      />
+                    )}
+                  </Pressable>
+                </View>
+                {isRecording ? (
+                  <Text style={styles.recHint} testID="recording-hint">
+                    Recording — tap the stop icon when done.
+                  </Text>
+                ) : null}
                 <Button
                   testID="step-next-phrase"
                   label="Continue"
@@ -354,6 +482,27 @@ const styles = StyleSheet.create({
     borderColor: Colors.divider2,
   },
   pinKeyText: { fontSize: 22, color: Colors.textPrimary, fontWeight: "600" },
+  phraseRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  micBtn: {
+    width: 52,
+    height: 52,
+    borderRadius: 52,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: Colors.brandFog,
+    borderWidth: 1,
+    borderColor: "#BAE6FD",
+  },
+  micBtnActive: {
+    backgroundColor: Colors.dangerBg,
+    borderColor: "#FECACA",
+  },
+  recHint: {
+    color: Colors.danger,
+    fontSize: 12,
+    fontWeight: "600",
+    marginTop: 2,
+  },
   roomTypeCard: {
     flexDirection: "row",
     alignItems: "center",
