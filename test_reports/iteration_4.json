@@ -1,0 +1,55 @@
+{
+  "summary": "Iteration 4 backend + frontend verification PASSED. 83/83 backend pytest cases pass (80 carry-forward + 3 NEW iter-4 tests in test_iteration4_features.py: owner /leave permanently closes the room with status='ended', wipes db.messages, creates forensic fragments, AND that phrase+pin no longer summons the room; non-owner /end wipes session messages, broadcasts WS {type:'ended', by_name} to the connected owner, and leaves room.status as not 'ended' (session_active=false); read-receipt WS auto-wipe verified with TWO concurrent WS clients — sender A sees {type:'deleted', message_id} when reader B POSTs /messages/{id}/read, and DB row is deleted). Frontend smoke (mobile viewport 375x667 on the public preview): home logo renders with the new asset URL https://customer-assets.emergentagent.com/job_intent-space-1/artifacts/y7sd33ie_image.png inside the consentalk-logo wrapper; profile-name shows full name 'Giridhar Alwar' (not initials); menu-premium present; custom in-app confirm modal renders with confirm-title='Sign out' + confirm-cancel + confirm-ok (cancel keeps the user signed in); /premium region-INR/region-USD/plan-monthly_inr/subscribe-monthly_inr all present; admin dashboard header 'Super-Admin Console' visible without truncation.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "global",
+        "issues": [
+          "Non-blocking deprecation warnings in console: 'Image: style.resizeMode is deprecated. Please use props.resizeMode' (Logo.tsx + others) and '[expo-av]: deprecated, use expo-audio/expo-video for SDK 54'. Also 'props.pointerEvents is deprecated. Use style.pointerEvents'. None break functionality but will need migration before Expo SDK 54."
+        ]
+      }
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_consentalk_api.py",
+    "/app/backend/tests/test_iteration2_features.py",
+    "/app/backend/tests/test_iteration3_features.py",
+    "/app/backend/tests/test_iteration4_features.py (NEW)",
+    "/app/backend/tests/conftest.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "(Tracking) /app/backend/server.py is now 1743 lines — split into routers/ (rooms, billing, rbac, admin, websocket) before next iteration. Same recommendation as iter 2/3.",
+    "(Tracking) /api/billing/subscribe and /api/profile/phone/request-otp remain MOCKED — wire to real Razorpay/Stripe + SMS provider before launch.",
+    "(Minor) Fix react-native-web deprecation warnings: replace style.resizeMode with props resizeMode in Logo.tsx and any other Image users; migrate expo-av to expo-audio/expo-video before SDK 54.",
+    "(Tracking from iter 3) Direct /admin URL hits an auth-redirect race; mitigated in this run by entering via /(tabs)/profile -> menu-admin. Consider showing a loading state while AuthContext hydrates.",
+    "(Tracking) admin tab body switching reported broken in iteration 3 was not re-verified end-to-end this run — main agent should confirm fix in next iteration."
+  ],
+  "critical_code_review_comments": [
+    "leave_room (server.py:838) is mostly a duplicate of end_room_session (server.py:790) for the owner branch. Extract a private _wipe_and_archive(room_id, user) helper to follow DRY.",
+    "summon_room filters status='active' so ended rooms are correctly hidden — confirmed by test_owner_leave_sets_status_ended_and_wipes. However, /api/rooms/{id}/end (non-owner) does NOT set status='ended', meaning if an owner non-owner pair ping-pong the End button, the room stays alive forever. Behavior is by design per iter-4 spec but worth surfacing in product copy.",
+    "mark_message_read condition `read_by.issuperset(other_members)` is correct, but if room.members has only the sender (e.g. the other member already left), other_members=[] -> condition is False and message lingers. Consider treating empty other_members as 'auto-delete' since there is no one else to read it.",
+    "ConnectionManager.broadcast iterates over a snapshot but does not catch send exceptions — a stale websocket can silently drop subsequent broadcasts to other clients. Wrap each send in try/except in a future iteration.",
+    "Frontend Logo.tsx still uses style.resizeMode — react-native-web emits a deprecation warning. Move to <Image resizeMode='contain' .../>."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration4_features.py (NEW — 3 tests covering owner permanent close, non-owner end WS broadcast + status, two-client read-receipt WS auto-wipe)",
+    "/app/test_reports/pytest/pytest_results.xml (regenerated)"
+  ],
+  "success_rate": {
+    "backend": "100% (83/83 — 80 existing + 3 new iter-4)",
+    "frontend": "100% smoke (logo URL, profile-name=Giridhar Alwar, menu-premium, confirm modal title/cancel/ok, premium region+plan+subscribe, admin header 'Super-Admin Console' visible)"
+  },
+  "seed_data_creation": "Frontend smoke used canonical super-admin user email='alwargiridhar@gmail.com' (name='Giridhar Alwar', role='super_admin') with session token TOKEN=fe_iter4_1778304916762 (valid 7d). Safe to leave; reusable by next testing agent. Backend pytest fixtures continue to clean up TEST_-prefixed transient users automatically.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Run: `pytest /app/backend/tests/ -v -o asyncio_mode=auto --junitxml=/app/test_reports/pytest/pytest_results.xml`. test_iteration4_features.py adds: TestOwnerLeavePermanentClose (owner /leave -> status='ended', forensic fragments, no longer summonable), TestNonOwnerEndWipes (non-owner /end -> wipes msgs + WS 'ended' broadcast, status not flipped to ended), TestReadReceiptWsBroadcast (sender's WS receives {type:'deleted', message_id} when other member POSTs /messages/{id}/read). Frontend testIDs verified live: consentalk-logo (with src=customer-assets.../y7sd33ie_image.png), profile-name='Giridhar Alwar', menu-premium, menu-signout triggers confirm modal with confirm-title/'Sign out'/confirm-cancel/confirm-ok; /premium region-INR/region-USD/plan-monthly_inr/subscribe-monthly_inr; admin header 'Super-Admin Console' visible. Deep-link /admin still races with AuthContext hydration so navigate via /(tabs)/profile -> menu-admin. Iter-3 reported admin-tab-body switching bug — not re-verified in iter-4; check before next release.",
+  "rca_of_issue": "Not applicable — no failures this run. Read-receipt auto-wipe (user complaint) verified end-to-end with 2 WS clients; broadcast {type:'deleted', message_id} reaches the sender and DB row is removed. Owner force-exit close (user complaint about End button not actually ending) verified — /rooms/{id}/leave on owner sets status='ended', wipes messages, creates forensic fragments, and same phrase+pin no longer returns that room from /rooms/summon."
+}

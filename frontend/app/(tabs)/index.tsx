@@ -25,7 +25,7 @@ import { Colors, Radii } from "../../src/lib/theme";
 import { api, backendUrl, getStoredToken } from "../../src/lib/api";
 import { useAuth } from "../../src/contexts/AuthContext";
 import { startWebRecorder, blobFilename, WebRecorder } from "../../src/lib/webRecorder";
-import { confirmDialog, notifyDialog } from "../../src/lib/confirm";
+import { useConfirm } from "../../src/contexts/ConfirmContext";
 
 type Step = "idle" | "phrase" | "pin" | "summoning" | "results";
 
@@ -39,6 +39,7 @@ interface RoomCard {
 export default function HomeScreen() {
   const router = useRouter();
   const { user } = useAuth();
+  const { confirm, notify } = useConfirm();
   const [step, setStep] = useState<Step>("idle");
   const [phrase, setPhrase] = useState("");
   const [pin, setPin] = useState("");
@@ -226,7 +227,7 @@ export default function HomeScreen() {
 
   const leaveOrEnd = async (room: RoomCard) => {
     const isOwner = room.owner_user_id === user?.user_id;
-    const ok = await confirmDialog({
+    const ok = await confirm({
       title: isOwner ? "End & delete this room?" : "Leave this room?",
       message: isOwner
         ? "Messages will be wiped and the room will close for everyone."
@@ -239,7 +240,7 @@ export default function HomeScreen() {
       await api(`/rooms/${room.room_id}/leave`, { method: "POST" });
       setResults((prev) => prev.filter((r) => r.room_id !== room.room_id));
     } catch (e: any) {
-      notifyDialog("Couldn't perform", e?.message || "Try again");
+      await notify("Couldn't perform", e?.message || "Try again");
     }
   };
 

@@ -13,7 +13,8 @@ import { LinearGradient } from "expo-linear-gradient";
 import AmbientBackground from "../../src/components/AmbientBackground";
 import { Colors, Radii } from "../../src/lib/theme";
 import { useAuth } from "../../src/contexts/AuthContext";
-import { confirmDialog, getInitials, gradientFor } from "../../src/lib/confirm";
+import { useConfirm } from "../../src/contexts/ConfirmContext";
+import { gradientFor } from "../../src/lib/confirm";
 
 interface MenuItem {
   testID: string;
@@ -29,6 +30,7 @@ interface MenuItem {
 export default function ProfileScreen() {
   const router = useRouter();
   const { user, signOut } = useAuth();
+  const { confirm } = useConfirm();
 
   const items: MenuItem[] = [
     {
@@ -106,7 +108,7 @@ export default function ProfileScreen() {
     caption: "Ends this session",
     destructive: true,
     onPress: async () => {
-      const ok = await confirmDialog({
+      const ok = await confirm({
         title: "Sign out",
         message: "End your Consentalk session on this device?",
         confirmLabel: "Sign out",
@@ -130,7 +132,14 @@ export default function ProfileScreen() {
                   colors={gradientFor(user?.user_id || user?.email || "?")}
                   style={[StyleSheet.absoluteFillObject, { borderRadius: 96 }]}
                 />
-                <Text style={styles.avatarInitials}>{getInitials(user?.name)}</Text>
+                <Text style={styles.avatarInitials}>
+                  {(user?.name || "?")
+                    .trim()
+                    .split(/\s+/)
+                    .map((p) => p[0]?.toUpperCase() || "")
+                    .slice(0, 2)
+                    .join("") || "?"}
+                </Text>
               </View>
               {user?.verified ? (
                 <View style={styles.verifyDot}>
@@ -139,7 +148,7 @@ export default function ProfileScreen() {
               ) : null}
             </View>
             <Text style={styles.name} testID="profile-name">
-              {getInitials(user?.name)} <Text style={styles.alias}>· you</Text>
+              {user?.name}
             </Text>
             <Text style={styles.email}>{user?.email}</Text>
             <View style={styles.badgeRow}>

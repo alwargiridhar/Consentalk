@@ -25,6 +25,7 @@ import { Colors, Radii } from "../../src/lib/theme";
 import { api, getStoredToken, wsUrl } from "../../src/lib/api";
 import { useAuth } from "../../src/contexts/AuthContext";
 import { confirmDialog, notifyDialog, getInitials, gradientFor } from "../../src/lib/confirm";
+import { useConfirm } from "../../src/contexts/ConfirmContext";
 
 interface Member {
   user_id: string;
@@ -73,6 +74,7 @@ export default function RoomChat() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const { user } = useAuth();
+  const { confirm, notify } = useConfirm();
   const [room, setRoom] = useState<RoomData | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
@@ -304,22 +306,34 @@ export default function RoomChat() {
   };
 
   const endConversation = async () => {
-    const ok = await confirmDialog({
-      title: "End conversation?",
-      message:
-        "All messages in this room will be wiped immediately. The room will close for everyone.",
-      confirmLabel: "End now",
+    const isOwner = room && room.owner_user_id === user?.user_id;
+    const ok = await confirm({
+      title: isOwner ? "End & permanently close this room?" : "End conversation?",
+      message: isOwner
+        ? "All messages will be wiped immediately and the room will be permanently closed for everyone."
+        : "All messages in this room will be wiped immediately and you will leave.",
+      confirmLabel: isOwner ? "End & delete" : "End now",
       destructive: true,
     });
     if (!ok) return;
     setEndBusy(true);
     try {
-      await api(`/rooms/${id}/end`, { method: "POST" });
+      // Owner uses /leave to permanently close the room (status=ended).
+      // Non-owner uses /end to wipe and exit.
+      if (isOwner) {
+        await api(`/rooms/${id}/leave`, { method: "POST" });
+      } else {
+        await api(`/rooms/${id}/end`, { method: "POST" });
+      }
       setMessages([]);
-      setEndedNotice("You ended the conversation. Messages wiped.");
+      setEndedNotice(
+        isOwner
+          ? "You closed this room. Messages wiped for everyone."
+          : "You ended the conversation. Messages wiped."
+      );
       setTimeout(() => router.replace("/(tabs)"), 800);
     } catch (e: any) {
-      notifyDialog("Couldn't end", e?.message || "Try again");
+      await notify("Couldn't end", e?.message || "Try again");
     } finally {
       setEndBusy(false);
     }

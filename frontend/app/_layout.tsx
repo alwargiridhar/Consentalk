@@ -4,21 +4,24 @@ import { StatusBar } from "expo-status-bar";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { AuthProvider } from "../src/contexts/AuthContext";
+import { ConfirmProvider } from "../src/contexts/ConfirmContext";
 
 export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
-        <AuthProvider>
-          <StatusBar style="dark" />
-          <Stack
-            screenOptions={{
-              headerShown: false,
-              contentStyle: { backgroundColor: "#F8FAFC" },
-              animation: "fade",
-            }}
-          />
-        </AuthProvider>
+        <ConfirmProvider>
+          <AuthProvider>
+            <StatusBar style="dark" />
+            <Stack
+              screenOptions={{
+                headerShown: false,
+                contentStyle: { backgroundColor: "#F8FAFC" },
+                animation: "fade",
+              }}
+            />
+          </AuthProvider>
+        </ConfirmProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );

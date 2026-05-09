@@ -16,7 +16,7 @@ import AmbientBackground from "../../src/components/AmbientBackground";
 import { Colors, Radii } from "../../src/lib/theme";
 import { api } from "../../src/lib/api";
 import { useAuth } from "../../src/contexts/AuthContext";
-import { confirmDialog, notifyDialog } from "../../src/lib/confirm";
+import { useConfirm } from "../../src/contexts/ConfirmContext";
 
 interface UserRow {
   user_id: string;
@@ -53,6 +53,7 @@ type Tab = "users" | "reports" | "billing" | "roles" | "analytics" | "forensic" 
 export default function AdminDashboard() {
   const { user } = useAuth();
   const router = useRouter();
+  const { confirm, notify } = useConfirm();
   const [tab, setTab] = useState<Tab>("users");
   const [users, setUsers] = useState<UserRow[]>([]);
   const [reports, setReports] = useState<Report[]>([]);
@@ -103,7 +104,7 @@ export default function AdminDashboard() {
         setAnalytics(a);
       }
     } catch (e: any) {
-      notifyDialog("Couldn't load", e?.message || "Try again");
+      notify("Couldn't load", e?.message || "Try again");
     }
   }, [tab]);
 
@@ -123,7 +124,7 @@ export default function AdminDashboard() {
   }
 
   const action = async (target_user_id: string, act: string, label: string) => {
-    const ok = await confirmDialog({
+    const ok = await confirm({
       title: label,
       message: "Apply this action?",
       confirmLabel: "Apply",
@@ -134,12 +135,12 @@ export default function AdminDashboard() {
       await api("/admin/users/action", { body: { target_user_id, action: act } });
       await load();
     } catch (e: any) {
-      notifyDialog("Failed", e?.message || "Try again");
+      await notify("Failed", e?.message || "Try again");
     }
   };
 
   const role = async (target_user_id: string, newRole: string) => {
-    const ok = await confirmDialog({
+    const ok = await confirm({
       title: "Change role",
       message: `Set role to ${newRole}?`,
       confirmLabel: "Apply",
@@ -149,12 +150,12 @@ export default function AdminDashboard() {
       await api("/admin/users/role", { body: { target_user_id, role: newRole } });
       await load();
     } catch (e: any) {
-      notifyDialog("Failed", e?.message || "Try again");
+      await notify("Failed", e?.message || "Try again");
     }
   };
 
   const grantPremium = async (target_user_id: string, plan_id: string) => {
-    const ok = await confirmDialog({
+    const ok = await confirm({
       title: "Grant premium",
       message: `Grant ${plan_id} to this user?`,
       confirmLabel: "Grant",
@@ -164,12 +165,12 @@ export default function AdminDashboard() {
       await api("/admin/billing/grant", { body: { target_user_id, plan_id } });
       await load();
     } catch (e: any) {
-      notifyDialog("Failed", e?.message || "Try again");
+      await notify("Failed", e?.message || "Try again");
     }
   };
 
   const revokePremium = async (target_user_id: string) => {
-    const ok = await confirmDialog({
+    const ok = await confirm({
       title: "Revoke premium?",
       message: "This user will be moved back to the free tier.",
       confirmLabel: "Revoke",
@@ -180,7 +181,7 @@ export default function AdminDashboard() {
       await api("/admin/billing/revoke", { body: { target_user_id, plan_id: "monthly_inr" } });
       await load();
     } catch (e: any) {
-      notifyDialog("Failed", e?.message || "Try again");
+      await notify("Failed", e?.message || "Try again");
     }
   };
 
@@ -191,13 +192,13 @@ export default function AdminDashboard() {
           <Pressable onPress={() => router.back()} style={styles.backBtn}>
             <Ionicons name="chevron-back" size={20} color={Colors.textSecondary} />
           </Pressable>
-          <View style={{ flex: 1, alignItems: "center" }}>
-            <Text style={styles.title}>
+          <View style={{ flex: 1, paddingHorizontal: 12 }}>
+            <Text style={styles.title} numberOfLines={1} adjustsFontSizeToFit>
               {isSuper ? "Super-Admin Console" : "Moderation Console"}
             </Text>
-            <Text style={styles.subtitle}>
+            <Text style={styles.subtitle} numberOfLines={1}>
               {isSuper
-                ? "All rights reserved by Giridhar Alwar — © GA"
+                ? "© Giridhar Alwar — all rights reserved"
                 : "Targeted, consent-first moderation"}
             </Text>
           </View>
@@ -565,6 +566,7 @@ function RolesTab({
   onCreated: () => void;
   onAssigned: () => void;
 }) {
+  const { notify } = useConfirm();
   const [name, setName] = useState("");
   const [desc, setDesc] = useState("");
   const [chosen, setChosen] = useState<Set<string>>(new Set());
@@ -592,7 +594,7 @@ function RolesTab({
       setChosen(new Set());
       onCreated();
     } catch (e: any) {
-      notifyDialog("Failed", e?.message || "Try again");
+      await notify("Failed", e?.message || "Try again");
     } finally {
       setBusy(false);
     }
@@ -610,9 +612,9 @@ function RolesTab({
     try {
       await api("/admin/users/assign-role", { body: { target_user_id, role_id } });
       onAssigned();
-      notifyDialog("Role assigned", "User now has the new role permissions.");
+      await notify("Role assigned", "User now has the new role permissions.");
     } catch (e: any) {
-      notifyDialog("Failed", e?.message || "Try again");
+      await notify("Failed", e?.message || "Try again");
     }
   };
 

@@ -56,4 +56,4 @@ export const Shadow = {
 };
 
 export const LOGO_URL =
-  "https://customer-assets.emergentagent.com/job_fed6e79a-f938-419e-84c2-16a2e6e6d63b/artifacts/4tfc8jgv_image.png";
+  "https://customer-assets.emergentagent.com/job_intent-space-1/artifacts/y7sd33ie_image.png";
