@@ -96,20 +96,22 @@ export default function RoomChat() {
   );
   const scrollRef = useRef<ScrollView | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  const readSent = useRef<Set<string>>(new Set());
 
   const load = useCallback(async () => {
     if (!id) return;
     try {
       const r = await api<RoomData>(`/rooms/${id}`);
       setRoom(r);
-      const m = await api<{ messages: Message[] }>(`/rooms/${id}/messages`);
-      setMessages(m.messages || []);
+      // Privacy default: do NOT fetch historical messages on mount.
+      // Each chat visit is a fresh session — messages from prior sessions
+      // never re-appear. Only new messages received via WebSocket during
+      // this session will be displayed.
+      setMessages([]);
     } catch (e: any) {
-      Alert.alert("Couldn't open room", e?.message || "Try again");
+      await notify("Couldn't open room", e?.message || "Try again");
       router.back();
     }
-  }, [id, router]);
+  }, [id, router, notify]);
 
   useEffect(() => {
     load();
@@ -138,9 +140,8 @@ export default function RoomChat() {
                 50
               );
             } else if (data.type === "deleted" && data.message_id) {
-              setMessages((prev) =>
-                prev.filter((m) => m.message_id !== data.message_id)
-              );
+              // Server may still emit deleted events from older clients; ignore
+              // them now that messages persist until refresh/leave.
             } else if (data.type === "ended") {
               setEndedNotice(`${data.by_name || "Someone"} ended the conversation.`);
               setMessages([]);
@@ -179,24 +180,9 @@ export default function RoomChat() {
     };
   }, [id, user?.user_id]);
 
-  // mark messages as read (on initial load + when new arrives)
-  useEffect(() => {
-    if (!id || !user?.user_id) return;
-    const toMark = messages.filter(
-      (m) =>
-        m.sender_user_id !== user.user_id &&
-        !readSent.current.has(m.message_id)
-    );
-    if (toMark.length === 0) return;
-    toMark.forEach((m) => readSent.current.add(m.message_id));
-    Promise.all(
-      toMark.map((m) =>
-        api(`/rooms/${id}/messages/${m.message_id}/read`, { method: "POST" }).catch(
-          () => null
-        )
-      )
-    );
-  }, [messages, id, user?.user_id]);
+  // Read-receipt auto-delete intentionally removed. Messages remain visible
+  // for as long as the user is on this chat screen. They disappear when the
+  // chat is refreshed or revisited (because `load` starts with an empty list).
 
   const send = async (override?: { content_type: string; content: string }) => {
     const payload = override ?? { content_type: "text", content: draft.trim() };
@@ -497,7 +483,7 @@ export default function RoomChat() {
             <View style={styles.banner} testID="ephemeral-banner">
               <Ionicons name="time-outline" size={14} color={Colors.brandPrimary} />
               <Text style={styles.bannerText}>
-                Messages auto-delete once read by everyone.
+                Messages stay while you're here. They disappear on refresh.
               </Text>
             </View>
 

@@ -31,8 +31,9 @@ export default function AuthScreen() {
             <Text style={styles.brand}>Consentalk</Text>
             <Text style={styles.tag}>— Private by Presence —</Text>
             <Text style={styles.intro}>
-              A consent-first space for intentional, ephemeral conversations.
-              Rooms appear only when you summon them — by phrase and PIN.
+              A private space for intentional conversations that disappear
+              naturally. Rooms appear only when you summon them — by phrase
+              and PIN.
             </Text>
           </View>
 
@@ -79,8 +80,8 @@ export default function AuthScreen() {
 
             <Text style={styles.terms}>
               By continuing you agree to use Consentalk for lawful, consensual
-              communication. We never sell data. Severe abuse signals may
-              trigger lawful safety review.
+              communication. We never sell data. Consentalk balances privacy,
+              safety, and lawful responsibility.
             </Text>
           </View>
         </ScrollView>
