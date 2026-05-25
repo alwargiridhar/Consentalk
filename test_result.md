@@ -123,6 +123,9 @@ frontend:
       - working: "NA"
         agent: "main"
         comment: "Rebuilt premium screen with explicit 3-day free trial CTA via /billing/start-trial; subscription buttons call iap.purchaseSubscription which falls back to /billing/subscribe on web; status banner shows trial vs paid; restorePurchases wired."
+      - working: "NA"
+        agent: "main"
+        comment: "Fix per testing agent: use Promise.allSettled so /billing/plans renders even when /billing/me returns 401 for anonymous viewers. Inline error banner (testID='plans-error-banner' + 'plans-retry') instead of blocking modal."
 
   - task: "Full-screen Image Viewer in chat"
     implemented: true

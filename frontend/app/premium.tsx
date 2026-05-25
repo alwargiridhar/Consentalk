@@ -69,17 +69,29 @@ export default function PremiumScreen() {
   const [trialBusy, setTrialBusy] = useState(false);
   const [restoreBusy, setRestoreBusy] = useState(false);
 
+  const [loadError, setLoadError] = useState<string | null>(null);
   const load = async () => {
     setLoading(true);
+    setLoadError(null);
     try {
-      const [plans, mine] = await Promise.all([
+      // Plans endpoint is public — render it even if the user is signed out.
+      // /billing/me requires auth and may 401 for visitors; treat as anonymous.
+      const [plansRes, meRes] = await Promise.allSettled([
         api<PlansResp>("/billing/plans"),
         api<BillingMe>("/billing/me"),
       ]);
-      setData(plans);
-      setMe(mine);
-    } catch (e: any) {
-      await notify("Couldn't load plans", e?.message || "Try again");
+      if (plansRes.status === "fulfilled") {
+        setData(plansRes.value);
+      } else {
+        setLoadError(
+          (plansRes.reason as any)?.message || "Couldn't load plans"
+        );
+      }
+      if (meRes.status === "fulfilled") {
+        setMe(meRes.value);
+      } else {
+        setMe(null); // anonymous viewer — show CTA but require sign-in to act
+      }
     } finally {
       setLoading(false);
     }
@@ -225,6 +237,16 @@ export default function PremiumScreen() {
               conversation tools — and a {trialDays}-day free trial to feel it.
             </Text>
           </LinearGradient>
+
+          {loadError ? (
+            <View style={styles.errorBanner} testID="plans-error-banner">
+              <Ionicons name="warning-outline" size={16} color={Colors.danger} />
+              <Text style={styles.errorText}>{loadError}</Text>
+              <Pressable onPress={load} style={styles.errorRetry} testID="plans-retry">
+                <Text style={styles.errorRetryText}>Retry</Text>
+              </Pressable>
+            </View>
+          ) : null}
 
           {me?.is_admin_unlimited ? (
             <View style={styles.adminBanner} testID="admin-unlimited-banner">
@@ -486,6 +508,27 @@ const styles = StyleSheet.create({
     borderColor: "#BAE6FD",
   },
   adminBannerText: { flex: 1, color: Colors.brandDeep, fontSize: 13, fontWeight: "600" },
+  errorBanner: {
+    marginTop: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    padding: 12,
+    backgroundColor: Colors.dangerBg,
+    borderRadius: Radii.lg,
+    borderWidth: 1,
+    borderColor: "#FECACA",
+  },
+  errorText: { flex: 1, color: Colors.danger, fontSize: 12, fontWeight: "600" },
+  errorRetry: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: Colors.paper,
+    borderRadius: Radii.pill,
+    borderWidth: 1,
+    borderColor: "#FECACA",
+  },
+  errorRetryText: { color: Colors.danger, fontSize: 11, fontWeight: "700" },
   trialCard: {
     marginTop: 16,
     padding: 22,

@@ -4,7 +4,15 @@
 A privacy-first, consent-based, ephemeral communication mobile app where rooms are invisible by default and only appear when a member intentionally summons them with a phrase + PIN. Tagline: **"Private by Presence."**
 
 ## Status
-**MVP Complete** — 35/35 backend tests passing, frontend smoke 100%.
+**Iteration 7 complete** — Backend 83/83 + new iter-7 suite 10/10. Frontend wiring of Iter-6 backend features done (image viewer, IAP+free-trial-first, join approvals, voice dictation).
+
+## Monetisation
+- **Free tier** — 1 room/day, 3 images/day, Light mode only
+- **Presence (premium)** — Unlimited rooms, unlimited images, Deep mode (phrase + PIN), priority support
+  - **3-day free trial** auto-applied before any charge (cannot be re-used per account)
+  - **₹99 / month** (Google Play `presence_monthly`) or **$1.99 / month** (US)
+  - **₹999 / year** (Google Play `presence_yearly`) or **$19.99 / year** (US)
+  - Admin / super-admin accounts have unlimited entitlement automatically
 
 ## Core principles
 - Privacy by design — phrases & PINs stored only as one-way SHA-256 hashes; no plaintext chat retention
