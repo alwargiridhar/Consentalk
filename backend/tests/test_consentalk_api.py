@@ -103,7 +103,7 @@ def created_room(user_a):
     s.headers.update({"Authorization": f"Bearer {user_a['session_token']}",
                       "Content-Type": "application/json"})
     payload = {"name": "TEST_Room", "phrase": "open sesame please",
-               "pin": "1234", "room_type": "duo"}
+               "pin": "1234", "room_type": "duo", "security_mode": "deep"}
     r = s.post(f"{BASE_URL}/api/rooms/create", json=payload)
     assert r.status_code == 200, r.text
     data = r.json()
@@ -123,7 +123,8 @@ def test_room_create_short_phrase(api, user_a):
 
 def test_room_create_short_pin(api, user_a):
     r = api.post(f"{BASE_URL}/api/rooms/create",
-                 json={"name": "x", "phrase": "valid phrase here", "pin": "12"},
+                 json={"name": "x", "phrase": "valid phrase here", "pin": "12",
+                       "security_mode": "deep"},
                  headers={"Authorization": f"Bearer {user_a['session_token']}"})
     assert r.status_code == 400
 
@@ -226,7 +227,8 @@ def test_end_room_wipes_and_archives(api, user_a, created_room, mongo):
 def test_invite_owner_only_and_accept_flow(api, user_a, user_b, mongo):
     # create new room
     r = api.post(f"{BASE_URL}/api/rooms/create",
-                 json={"name": "TEST_inv", "phrase": "invite phrase here", "pin": "5555"},
+                 json={"name": "TEST_inv", "phrase": "invite phrase here", "pin": "5555",
+                       "security_mode": "deep"},
                  headers={"Authorization": f"Bearer {user_a['session_token']}"})
     assert r.status_code == 200
     rid = r.json()["room_id"]
@@ -262,7 +264,8 @@ def test_invite_owner_only_and_accept_flow(api, user_a, user_b, mongo):
 
 def test_decline_invitation(api, user_a, user_b, mongo):
     r = api.post(f"{BASE_URL}/api/rooms/create",
-                 json={"name": "TEST_dec", "phrase": "decline this phrase", "pin": "6666"},
+                 json={"name": "TEST_dec", "phrase": "decline this phrase", "pin": "6666",
+                       "security_mode": "deep"},
                  headers={"Authorization": f"Bearer {user_a['session_token']}"})
     rid = r.json()["room_id"]
     r3 = api.post(f"{BASE_URL}/api/rooms/{rid}/invite",
@@ -456,6 +459,10 @@ def test_admin_audit(api, super_admin):
 # ---------- Auto super-admin promotion ----------
 def test_auto_super_admin_role_set(mongo):
     # backend startup forces alwargiridhar@gmail.com -> super_admin
+    doc = mongo.users.find_one({"email": "alwargiridhar@gmail.com"})
+    assert doc is not None
+    assert doc["role"] == "super_admin"
+  # backend startup forces alwargiridhar@gmail.com -> super_admin
     doc = mongo.users.find_one({"email": "alwargiridhar@gmail.com"})
     assert doc is not None
     assert doc["role"] == "super_admin"

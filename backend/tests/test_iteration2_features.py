@@ -91,7 +91,7 @@ class TestPhoneOtp:
 class TestInviteByPhone:
     def test_invite_neither_email_nor_phone_400(self, api, user_a):
         r = api.post(f"{BASE_URL}/api/rooms/create",
-                     json={"name": "TEST_inv_x", "phrase": "phone invite phrase", "pin": "1212"},
+                     json={"name": "TEST_inv_x", "phrase": "phone invite phrase", "pin": "1212", "security_mode": "deep"},
                      headers=auth(user_a["session_token"]))
         rid = r.json()["room_id"]
         r2 = api.post(f"{BASE_URL}/api/rooms/{rid}/invite",
@@ -108,7 +108,7 @@ class TestInviteByPhone:
                                             "full_legal_name": "B", "date_of_birth": "1990-01-01"}}},
         )
         r = api.post(f"{BASE_URL}/api/rooms/create",
-                     json={"name": "TEST_inv_p", "phrase": "phone link phrase", "pin": "9090"},
+                     json={"name": "TEST_inv_p", "phrase": "phone link phrase", "pin": "9090", "security_mode": "deep"},
                      headers=auth(user_a["session_token"]))
         rid = r.json()["room_id"]
         r2 = api.post(f"{BASE_URL}/api/rooms/{rid}/invite",
@@ -129,7 +129,7 @@ class TestInviteByPhone:
 class TestLeaveRoom:
     def test_non_owner_leave_removes_from_members(self, api, user_a, user_b, mongo):
         r = api.post(f"{BASE_URL}/api/rooms/create",
-                     json={"name": "TEST_leave1", "phrase": "leave non-owner phrase", "pin": "4444"},
+                     json={"name": "TEST_leave1", "phrase": "leave non-owner phrase", "pin": "4444", "security_mode": "deep"},
                      headers=auth(user_a["session_token"]))
         rid = r.json()["room_id"]
         # add b as member
@@ -147,7 +147,7 @@ class TestLeaveRoom:
 
     def test_owner_leave_closes_and_wipes(self, api, user_a, mongo):
         r = api.post(f"{BASE_URL}/api/rooms/create",
-                     json={"name": "TEST_leave2", "phrase": "leave owner phrase", "pin": "5151"},
+                     json={"name": "TEST_leave2", "phrase": "leave owner phrase", "pin": "5151", "security_mode": "deep"},
                      headers=auth(user_a["session_token"]))
         rid = r.json()["room_id"]
         # send a message
@@ -167,7 +167,7 @@ class TestLeaveRoom:
 
     def test_leave_non_member_404(self, api, user_a, user_b):
         r = api.post(f"{BASE_URL}/api/rooms/create",
-                     json={"name": "TEST_leave3", "phrase": "leave 404 phrase", "pin": "3131"},
+                     json={"name": "TEST_leave3", "phrase": "leave 404 phrase", "pin": "3131", "security_mode": "deep"},
                      headers=auth(user_a["session_token"]))
         rid = r.json()["room_id"]
         r2 = api.post(f"{BASE_URL}/api/rooms/{rid}/leave",
@@ -179,7 +179,7 @@ class TestLeaveRoom:
 class TestReadReceipts:
     def test_sender_read_returns_self(self, api, user_a, user_b, mongo):
         r = api.post(f"{BASE_URL}/api/rooms/create",
-                     json={"name": "TEST_read1", "phrase": "read receipt phrase one", "pin": "7777"},
+                     json={"name": "TEST_read1", "phrase": "read receipt phrase one", "pin": "7777", "security_mode": "deep"},
                      headers=auth(user_a["session_token"]))
         rid = r.json()["room_id"]
         mongo.rooms.update_one({"room_id": rid}, {"$addToSet": {"members": user_b["user_id"]}})
@@ -196,7 +196,7 @@ class TestReadReceipts:
 
     def test_all_others_read_deletes_message(self, api, user_a, user_b, mongo):
         r = api.post(f"{BASE_URL}/api/rooms/create",
-                     json={"name": "TEST_read2", "phrase": "read receipt phrase two", "pin": "8181"},
+                     json={"name": "TEST_read2", "phrase": "read receipt phrase two", "pin": "8181", "security_mode": "deep"},
                      headers=auth(user_a["session_token"]))
         rid = r.json()["room_id"]
         mongo.rooms.update_one({"room_id": rid}, {"$addToSet": {"members": user_b["user_id"]}})
@@ -215,7 +215,7 @@ class TestReadReceipts:
 class TestUserBasicInfo:
     def test_user_info_in_shared_room(self, api, user_a, user_b, mongo):
         r = api.post(f"{BASE_URL}/api/rooms/create",
-                     json={"name": "TEST_uinfo", "phrase": "shared room phrase here", "pin": "2424"},
+                     json={"name": "TEST_uinfo", "phrase": "shared room phrase here", "pin": "2424", "security_mode": "deep"},
                      headers=auth(user_a["session_token"]))
         rid = r.json()["room_id"]
         mongo.rooms.update_one({"room_id": rid}, {"$addToSet": {"members": user_b["user_id"]}})
@@ -231,7 +231,7 @@ class TestUserBasicInfo:
     def test_user_info_country_only_when_verified(self, api, user_a, user_b, mongo):
         # ensure a shared room
         r = api.post(f"{BASE_URL}/api/rooms/create",
-                     json={"name": "TEST_uinfo2", "phrase": "country gate phrase", "pin": "3535"},
+                     json={"name": "TEST_uinfo2", "phrase": "country gate phrase", "pin": "3535", "security_mode": "deep"},
                      headers=auth(user_a["session_token"]))
         rid = r.json()["room_id"]
         mongo.rooms.update_one({"room_id": rid}, {"$addToSet": {"members": user_b["user_id"]}})
@@ -295,7 +295,7 @@ class TestWebSocketBroadcasts:
         s = requests.Session()
         s.headers.update(auth(user_a["session_token"]))
         r = s.post(f"{BASE_URL}/api/rooms/create",
-                   json={"name": "TEST_ws_end", "phrase": "ws end phrase here", "pin": "1313"})
+                   json={"name": "TEST_ws_end", "phrase": "ws end phrase here", "pin": "1313", "security_mode": "deep"})
         rid = r.json()["room_id"]
         mongo.rooms.update_one({"room_id": rid}, {"$addToSet": {"members": user_b["user_id"]}})
         ws_b = await self._connect(rid, user_b["session_token"])
@@ -316,7 +316,7 @@ class TestWebSocketBroadcasts:
         s = requests.Session()
         s.headers.update(auth(user_a["session_token"]))
         r = s.post(f"{BASE_URL}/api/rooms/create",
-                   json={"name": "TEST_ws_ss", "phrase": "ws screenshot phrase", "pin": "1414"})
+                   json={"name": "TEST_ws_ss", "phrase": "ws screenshot phrase", "pin": "1414", "security_mode": "deep"})
         rid = r.json()["room_id"]
         mongo.rooms.update_one({"room_id": rid}, {"$addToSet": {"members": user_b["user_id"]}})
         ws_a = await self._connect(rid, user_a["session_token"])

@@ -75,7 +75,7 @@ class TestBillingPlans:
             assert p.get("price_label")
         ft = body.get("free_tier") or {}
         assert ft.get("rooms_per_day") == 1
-        assert ft.get("images_per_session") == 3
+        assert ft.get("images_per_day") == 3
         assert isinstance(ft.get("features"), list) and len(ft["features"]) > 0
         assert isinstance(body.get("premium_features"), list) and len(body["premium_features"]) > 0
 
@@ -178,7 +178,7 @@ class TestFreeTierRoomCap:
             r = api.post(f"{BASE_URL}/api/rooms/create",
                          json={"name": f"TEST_prem_{i}",
                                "phrase": f"premium room phrase {i} extra",
-                               "pin": "3030"},
+                               "pin": "3030", "security_mode": "deep"},
                          headers=auth(user_a["session_token"]))
             assert r.status_code == 200, f"premium room {i} blocked: {r.text}"
 
@@ -187,7 +187,7 @@ class TestFreeTierRoomCap:
             r = api.post(f"{BASE_URL}/api/rooms/create",
                          json={"name": f"TEST_sa_{i}",
                                "phrase": f"super admin room {i} phrase",
-                               "pin": "4040"},
+                               "pin": "4040", "security_mode": "deep"},
                          headers=auth(super_admin["session_token"]))
             assert r.status_code == 200, r.text
 
@@ -199,7 +199,7 @@ class TestFreeTierImageCap:
         try:
             r = api.post(f"{BASE_URL}/api/rooms/create",
                          json={"name": "TEST_imgcap", "phrase": "image cap phrase here",
-                               "pin": "5050"},
+                               "pin": "5050", "security_mode": "deep"},
                          headers=auth(u["session_token"]))
             assert r.status_code == 200, r.text
             rid = r.json()["room_id"]
@@ -223,7 +223,7 @@ class TestFreeTierImageCap:
     def test_premium_user_unlimited_images(self, api, user_a):
         r = api.post(f"{BASE_URL}/api/rooms/create",
                      json={"name": "TEST_premimg", "phrase": "prem img phrase here",
-                           "pin": "6060"},
+                           "pin": "6060", "security_mode": "deep"},
                      headers=auth(user_a["session_token"]))
         rid = r.json()["room_id"]
         for i in range(5):

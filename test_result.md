@@ -101,3 +101,106 @@
 #====================================================================================================
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
+
+user_problem_statement: |
+  Iteration 7 — Frontend wiring of the new backend features completed in Iteration 6:
+  1. Wire up full-screen Image Viewer (pinch-to-zoom, swipe to close) in chat room.
+  2. Wire up Google Play Billing UI in premium screen, with a 3-day free trial CTA before charging.
+  3. Surface Light vs Deep mode + Join Approval workflow inside the room (owner sees pending requests with name+email and approves/rejects).
+  4. Add live voice-to-text dictation directly into the chat input (in addition to voice notes).
+  5. Confirm Android package name is com.consentalk.app (already set).
+  6. Fix pricing text on profile to ₹99/mo.
+
+frontend:
+  - task: "Premium screen — 3-day free trial CTA + IAP wiring"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/premium.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Rebuilt premium screen with explicit 3-day free trial CTA via /billing/start-trial; subscription buttons call iap.purchaseSubscription which falls back to /billing/subscribe on web; status banner shows trial vs paid; restorePurchases wired."
+
+  - task: "Full-screen Image Viewer in chat"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/room/[id].tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Wrapped image bubbles in Pressable to open ImageViewer modal (already created). Pinch/double-tap zoom + swipe-down close on native, double-tap+× on web."
+
+  - task: "Join Approval banner — owner sees pending requests"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/components/JoinRequestsBanner.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "New banner inside the room (owner only) that lists pending join requests with name + email, approve / reject buttons; refreshes on WS join_request events."
+
+  - task: "Voice dictation into chat input"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/room/[id].tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Added dictate-to-text button in composer (web + native). Transcribes via /api/voice/transcribe and appends text to draft."
+
+  - task: "Pricing copy fix on profile"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/(tabs)/profile.tsx"
+    stuck_count: 0
+    priority: "low"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Changed caption to '3-day free trial · then ₹99/mo or ₹999/yr'."
+
+backend:
+  - task: "Backend endpoints for Iteration 6 (already complete & tested 83/83 in prior session)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "Light/Deep modes, /billing/start-trial, /billing/subscribe, /billing/google-play/verify-purchase, /rooms/{id}/request-join, /rooms/{id}/join-requests, /decision, and free-tier quotas all green from previous iteration."
+
+metadata:
+  created_by: "main_agent"
+  version: "7.0"
+  test_sequence: 5
+  run_ui: false
+
+test_plan:
+  current_focus:
+    - "Premium screen — 3-day free trial CTA + IAP wiring"
+    - "Full-screen Image Viewer in chat"
+    - "Join Approval banner — owner sees pending requests"
+    - "Voice dictation into chat input"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: "Iteration 7 frontend wiring complete. Please test the four high-priority items end-to-end. Backend is already at 83/83 from prior iteration."

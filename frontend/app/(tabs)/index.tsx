@@ -34,6 +34,14 @@ interface RoomCard {
   name: string;
   room_type: string;
   owner_user_id?: string;
+  security_mode?: string;
+}
+
+interface JoinCandidate {
+  room_id: string;
+  name: string;
+  room_type: string;
+  security_mode: string;
 }
 
 export default function HomeScreen() {
@@ -49,6 +57,8 @@ export default function HomeScreen() {
   const [busy, setBusy] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
   const [results, setResults] = useState<RoomCard[]>([]);
+  const [joinCandidate, setJoinCandidate] = useState<JoinCandidate | null>(null);
+  const [joinSent, setJoinSent] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const phraseRef = useRef<TextInput | null>(null);
 
@@ -203,25 +213,39 @@ export default function HomeScreen() {
     setPin((p) => p + digit);
   };
 
-  const summon = async () => {
-    if (pin.length < 4) {
-      setError("PIN must be 4–6 digits.");
+  const summon = async (skipPin = false) => {
+    if (!skipPin && pin.length < 4) {
+      setError("PIN must be 4–6 digits, or tap 'No PIN — Light room'.");
       return;
     }
     setError(null);
     setBusy(true);
+    setJoinCandidate(null);
+    setJoinSent(false);
     setStep("summoning");
     try {
-      const r = await api<{ rooms: RoomCard[] }>("/rooms/summon", {
-        body: { phrase, pin },
-      });
+      const r = await api<{ rooms: RoomCard[]; join_candidate: JoinCandidate | null }>(
+        "/rooms/summon",
+        { body: skipPin ? { phrase } : { phrase, pin } }
+      );
       setResults(r.rooms || []);
+      setJoinCandidate(r.join_candidate || null);
       setStep("results");
     } catch (e: any) {
       setError(e?.message || "Summoning failed");
       setStep("results");
     } finally {
       setBusy(false);
+    }
+  };
+
+  const requestJoin = async () => {
+    if (!joinCandidate) return;
+    try {
+      await api(`/rooms/${joinCandidate.room_id}/request-join`, { method: "POST" });
+      setJoinSent(true);
+    } catch (e: any) {
+      await notify("Couldn't request access", e?.message || "Try again");
     }
   };
 
@@ -382,13 +406,58 @@ export default function HomeScreen() {
             ) : (
               <View style={styles.resultsWrap}>
                 <Text style={styles.greet}>
-                  {results.length > 0 ? "These rooms appeared." : "No room responded."}
+                  {results.length > 0
+                    ? "These rooms appeared."
+                    : joinCandidate
+                    ? "Found a Light room with this phrase."
+                    : "No room responded."}
                 </Text>
                 <Text style={styles.helper}>
                   {results.length > 0
                     ? "Tap to enter. Long-press to leave / end."
+                    : joinCandidate
+                    ? "You're not a member yet — request access and the owner will approve."
                     : "Phrase, PIN, or membership did not match. Try again."}
                 </Text>
+
+                {joinCandidate ? (
+                  <View
+                    style={[styles.roomCard, { padding: 16, gap: 12 }]}
+                    testID="join-candidate-card"
+                  >
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+                      <View style={styles.roomIcon}>
+                        <Ionicons name="leaf-outline" size={22} color={Colors.brandPrimary} />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.roomName}>{joinCandidate.name}</Text>
+                        <Text style={styles.roomMeta}>
+                          {joinCandidate.room_type.toUpperCase()} · LIGHT
+                        </Text>
+                      </View>
+                    </View>
+                    {joinSent ? (
+                      <View style={[styles.skipBtn, { backgroundColor: Colors.successBg }]}>
+                        <Ionicons
+                          name="checkmark-circle"
+                          size={14}
+                          color={Colors.success}
+                        />
+                        <Text style={[styles.skipBtnText, { color: Colors.success }]}>
+                          Request sent — wait for owner approval
+                        </Text>
+                      </View>
+                    ) : (
+                      <Button
+                        testID="request-join-btn"
+                        label="Request to join"
+                        icon="hand-right-outline"
+                        onPress={requestJoin}
+                      />
+                    )}
+                  </View>
+                ) : null}
+
                 {results.map((r) => {
                   const isOwner = r.owner_user_id === user?.user_id;
                   return (
@@ -413,7 +482,8 @@ export default function HomeScreen() {
                         <View style={{ flex: 1 }}>
                           <Text style={styles.roomName}>{r.name}</Text>
                           <Text style={styles.roomMeta}>
-                            {r.room_type.toUpperCase()} ROOM • TAP TO ENTER
+                            {r.room_type.toUpperCase()} ·{" "}
+                            {(r.security_mode || "deep").toUpperCase()} · TAP TO ENTER
                           </Text>
                         </View>
                       </Pressable>
@@ -546,6 +616,20 @@ const styles = StyleSheet.create({
     borderColor: Colors.divider2,
   },
   pinKeyText: { fontSize: 22, color: Colors.textPrimary, fontWeight: "600" },
+  skipBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: Radii.pill,
+    backgroundColor: Colors.brandFog,
+    borderWidth: 1,
+    borderColor: "#BAE6FD",
+    marginTop: 10,
+    alignSelf: "center",
+  },
+  skipBtnText: { color: Colors.brandPrimary, fontSize: 12, fontWeight: "600" },
   error: { color: Colors.danger, marginTop: 12, fontSize: 13, textAlign: "center" },
   resultsWrap: { paddingTop: 16 },
   roomCard: {

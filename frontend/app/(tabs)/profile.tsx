@@ -96,7 +96,7 @@ export default function ProfileScreen() {
     label: user?.is_premium ? "Manage Premium" : "Upgrade to Presence",
     caption: user?.is_premium
       ? "You are a Premium member"
-      : "Unlimited rooms · unlimited media · ₹199/mo",
+      : "3-day free trial · then ₹99/mo or ₹999/yr",
     to: "/premium",
     badge: user?.is_premium ? "PRESENCE" : "PRO",
   });

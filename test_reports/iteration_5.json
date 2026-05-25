@@ -1,0 +1,59 @@
+{
+  "summary": "Iteration 7 (Consentalk) — Premium 3-day trial, Image Viewer, Join Approval Banner, Voice Dictation. Backend: 10/10 new pytest tests passed (billing plans w/ trial_days=3 + ₹99 / ₹999 labels, fresh-user billing/me, start-trial→200 with ~3-day until + trial_used=true, second call→400, subscribe yearly_inr→~365 days, google-play verify presence_monthly→30 days, restore returns entitlement, light-mode room join-request approve adds member, reject does NOT add, non-owner gets 403, voice/transcribe endpoint exists). Frontend (mobile viewport 390x844): /premium renders trial-card, start-trial-btn, region-INR/USD, plan-monthly_inr, plan-yearly_inr, restore-btn + correct copy '3 days free, then ₹99 / month' + ₹999 / year. /room/[id] composer renders image-btn, dictate-btn, msg-input, voice-btn, send-btn. JoinRequestsBanner with join-req-{id}, approve-{id}, reject-{id} renders for owner with pending requests. Deprecated packages detected: expo-av (multiple warnings in expo logs).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "PremiumScreen (/premium)",
+        "issue": "Promise.all(['/billing/plans','/billing/me']) makes the whole plans grid + restore button hidden when /billing/me 401s (unauthenticated). Anonymous visitors see only the trial-card and a 'Couldn't load plans / Not authenticated' modal even though /billing/plans is a public endpoint. Recommend wrapping /billing/me in its own try/catch so plans always render. Reference: /app/frontend/app/premium.tsx:72-86",
+        "testID": "trial-card",
+        "priority": "MEDIUM"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": [
+      {
+        "component": "expo-av",
+        "issue": "Deprecated in SDK 54. Repeated warning: '[expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the expo-audio and expo-video packages.' Migrate audio (voice recording / dictation) to expo-audio and video to expo-video. Reference: /app/frontend (any file importing 'expo-av'); confirmed via /var/log/supervisor/expo.err.log"
+      },
+      {
+        "component": "Image resizeMode",
+        "issue": "Warning: 'Image: style.resizeMode is deprecated. Please use props.resizeMode.' Move resizeMode from style={} to a direct prop on <Image />. Reference: see expo.err.log warnings."
+      },
+      {
+        "component": "props.pointerEvents",
+        "issue": "Warning: 'props.pointerEvents is deprecated. Use style.pointerEvents'. Reference: expo.err.log."
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration7_features.py",
+    "/app/test_reports/pytest/iter7_results.xml"
+  ],
+  "action_items": [
+    "Fix /premium so that /billing/plans renders even when /billing/me 401s. Decouple the two requests so anonymous users can still browse plans + Restore.",
+    "Migrate expo-av usage to expo-audio (and expo-video if video playback exists). Voice dictation/recording likely uses expo-av today.",
+    "Replace deprecated Image style.resizeMode with the resizeMode prop where applicable.",
+    "Replace deprecated props.pointerEvents with style.pointerEvents."
+  ],
+  "critical_code_review_comments": [
+    "premium.tsx: Promise.all collapses on a single failing dependency; consider Promise.allSettled or two separate try/catch so the public plans grid is resilient when /billing/me is unauthenticated.",
+    "Auth gating for /premium is unclear: route appears reachable without a session but client fetches /billing/me which requires auth — either gate /premium behind auth or make /billing/me non-fatal."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration7_features.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (10/10 new pytest cases)",
+    "frontend": "100% of new testIDs verified in source + rendered (trial-card, start-trial-btn, region-INR/USD, plan-monthly_inr, plan-yearly_inr, restore-btn, dictate-btn, join-requests-banner, join-req-{id}, approve-{id}, reject-{id})"
+  },
+  "seed_data_creation": "Created (and cleaned up) one room (TEST UI Room, light-mode duo) + 2 fresh users + 1 join request via Mongo + REST to drive the UI tests. Backend test suite uses transient TEST_ users per test (also cleaned up).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend /api/billing/* + room /api/rooms/{id}/request-join + /join-requests + /decision are all green. /premium UI tests must seed window.localStorage.setItem('consentalk.session_token', <token>) before navigating to /premium for the plans grid + restore-btn to render (see frontend bug noted above). Use conftest.py BASE_URL https://intent-space-1.preview.emergentagent.com.",
+  "rca_of_issue": "Anonymous /premium hides plans+restore: app/premium.tsx wraps both api('/billing/plans') and api('/billing/me') inside Promise.all and a single try/catch. Because /billing/me requires a Bearer session, an unauthenticated visit makes Promise.all reject; setData(plans) never runs, so the entire {data && (...)} JSX block — including <PlanCard> and Restore — stays hidden, and only the static trial-card remains visible plus a 'Not authenticated' modal. Mitigation: fetch plans first (no auth), then attempt billing/me separately and ignore 401, OR gate the /premium route behind the auth context."
+}

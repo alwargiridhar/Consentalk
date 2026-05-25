@@ -153,39 +153,48 @@ PLANS: Dict[str, Dict[str, Any]] = {
         "id": "monthly_inr",
         "name": "Consentalk Presence — Monthly",
         "currency": "INR",
-        "price": 199,
-        "price_label": "₹199 / month",
+        "price": 99,
+        "price_label": "₹99 / month",
         "days": 30,
+        "google_play_product_id": "presence_monthly",
+        "trial_days": 3,
     },
     "yearly_inr": {
         "id": "yearly_inr",
         "name": "Consentalk Presence — Yearly",
         "currency": "INR",
-        "price": 1999,
-        "price_label": "₹1,999 / year",
+        "price": 999,
+        "price_label": "₹999 / year",
         "days": 365,
+        "google_play_product_id": "presence_yearly",
+        "trial_days": 3,
     },
     "monthly_usd": {
         "id": "monthly_usd",
         "name": "Consentalk Presence — Monthly",
         "currency": "USD",
-        "price": 2.99,
-        "price_label": "$2.99 / month",
+        "price": 1.99,
+        "price_label": "$1.99 / month",
         "days": 30,
+        "google_play_product_id": "presence_monthly",
+        "trial_days": 3,
     },
     "yearly_usd": {
         "id": "yearly_usd",
         "name": "Consentalk Presence — Yearly",
         "currency": "USD",
-        "price": 29.99,
-        "price_label": "$29.99 / year",
+        "price": 19.99,
+        "price_label": "$19.99 / year",
         "days": 365,
+        "google_play_product_id": "presence_yearly",
+        "trial_days": 3,
     },
 }
 
 # Free-tier limits
 FREE_ROOMS_PER_DAY = 1
-FREE_IMAGES_PER_SESSION = 3
+FREE_IMAGES_PER_DAY = 3
+TRIAL_DAYS = 3
 
 # Built-in / default permission catalog
 PERMISSION_CATALOG = [
@@ -245,13 +254,23 @@ class PhoneOtpVerify(BaseModel):
 class CreateRoomInput(BaseModel):
     name: str
     phrase: str
-    pin: str
+    pin: Optional[str] = None  # optional in Light mode, required in Deep
     room_type: str = "duo"
+    security_mode: str = "light"  # "light" (phrase only) | "deep" (phrase + pin)
 
 
 class SummonRoomInput(BaseModel):
     phrase: str
-    pin: str
+    pin: Optional[str] = None
+
+
+class RoomSecurityInput(BaseModel):
+    security_mode: str
+    pin: Optional[str] = None  # required when switching to deep
+
+
+class JoinRequestApprovalInput(BaseModel):
+    approve: bool
 
 
 class InviteInput(BaseModel):
@@ -588,10 +607,33 @@ async def create_room(payload: CreateRoomInput, user: User = Depends(get_current
     phrase_norm = normalize_phrase(payload.phrase)
     if len(phrase_norm) < 3:
         raise HTTPException(status_code=400, detail="Phrase too short")
-    if not payload.pin or len(payload.pin) < 4:
-        raise HTTPException(status_code=400, detail="PIN must be at least 4 digits")
     if payload.room_type not in ("duo", "circle"):
         raise HTTPException(status_code=400, detail="Invalid room type")
+    if payload.security_mode not in ("light", "deep"):
+        raise HTTPException(status_code=400, detail="Invalid security_mode")
+
+    pin_value = (payload.pin or "").strip()
+    if payload.security_mode == "deep":
+        if not pin_value or len(pin_value) < 4:
+            raise HTTPException(status_code=400, detail="PIN must be at least 4 digits for Deep mode")
+        pin_hash = hash_pin(pin_value)
+    else:
+        pin_hash = None  # light mode has no PIN
+
+    # Light mode: phrase must be globally unique
+    if payload.security_mode == "light":
+        existing = await db.rooms.find_one(
+            {"phrase_hash": hash_phrase(phrase_norm), "status": "active", "security_mode": "light"},
+            {"_id": 0},
+        )
+        if existing:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Room already allocated. Please use a more unique phrase. "
+                    "Try adding more words for uniqueness."
+                ),
+            )
 
     # Free-tier limit: 1 room/day. Admin/super-admin/premium are unlimited.
     user_doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
@@ -616,8 +658,9 @@ async def create_room(payload: CreateRoomInput, user: User = Depends(get_current
             "owner_user_id": user.user_id,
             "name": payload.name.strip() or "Untitled Room",
             "room_type": payload.room_type,
+            "security_mode": payload.security_mode,
             "phrase_hash": hash_phrase(phrase_norm),
-            "pin_hash": hash_pin(payload.pin),
+            "pin_hash": pin_hash,
             "members": [user.user_id],
             "status": "active",
             "session_active": False,
@@ -625,7 +668,51 @@ async def create_room(payload: CreateRoomInput, user: User = Depends(get_current
             "last_active": utcnow(),
         }
     )
-    return {"room_id": room_id, "name": payload.name, "room_type": payload.room_type}
+    return {
+        "room_id": room_id,
+        "name": payload.name,
+        "room_type": payload.room_type,
+        "security_mode": payload.security_mode,
+    }
+
+
+@api_router.post("/rooms/{room_id}/security")
+async def change_room_security(
+    room_id: str,
+    payload: RoomSecurityInput,
+    user: User = Depends(get_current_user),
+):
+    room = await db.rooms.find_one({"room_id": room_id}, {"_id": 0})
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    if room["owner_user_id"] != user.user_id:
+        raise HTTPException(status_code=403, detail="Only the owner can change room security")
+    if payload.security_mode not in ("light", "deep"):
+        raise HTTPException(status_code=400, detail="Invalid security_mode")
+    update: Dict[str, Any] = {"security_mode": payload.security_mode}
+    if payload.security_mode == "deep":
+        if not payload.pin or len(payload.pin) < 4:
+            raise HTTPException(status_code=400, detail="PIN required for Deep mode")
+        update["pin_hash"] = hash_pin(payload.pin)
+    else:
+        # Light mode: drop the PIN, re-check phrase uniqueness
+        existing = await db.rooms.find_one(
+            {
+                "phrase_hash": room["phrase_hash"],
+                "status": "active",
+                "security_mode": "light",
+                "room_id": {"$ne": room_id},
+            },
+            {"_id": 0},
+        )
+        if existing:
+            raise HTTPException(
+                status_code=409,
+                detail="Phrase is already used by another Light room — pick a more unique phrase first.",
+            )
+        update["pin_hash"] = None
+    await db.rooms.update_one({"room_id": room_id}, {"$set": update})
+    return {"ok": True, "security_mode": payload.security_mode}
 
 
 @api_router.post("/rooms/summon")
@@ -633,23 +720,222 @@ async def summon_room(payload: SummonRoomInput, user: User = Depends(get_current
     if user.status in ("suspended", "blacklisted"):
         raise HTTPException(status_code=403, detail="Account restricted")
     p_hash = hash_phrase(payload.phrase)
-    pin_hash = hash_pin(payload.pin)
-    rooms_cursor = db.rooms.find(
-        {
-            "phrase_hash": p_hash,
-            "pin_hash": pin_hash,
-            "members": user.user_id,
-            "status": "active",
-        },
-        {"_id": 0, "phrase_hash": 0, "pin_hash": 0},
-    )
-    rooms = await rooms_cursor.to_list(50)
+
+    # Match rooms where this user is already a member AND phrase/pin matches
+    # the room's security mode.
+    query: Dict[str, Any] = {
+        "phrase_hash": p_hash,
+        "members": user.user_id,
+        "status": "active",
+    }
+    pin_value = (payload.pin or "").strip()
+    # If a PIN was supplied, it must match the room's pin_hash. If no PIN, only
+    # match rooms in Light mode (where pin_hash is None).
+    pin_hash = hash_pin(pin_value) if pin_value else None
+
+    rooms_cursor = db.rooms.find(query, {"_id": 0, "phrase_hash": 0, "pin_hash": 0})
+    all_rooms = await rooms_cursor.to_list(50)
+    rooms = []
+    for r in all_rooms:
+        mode = r.get("security_mode", "deep")
+        # Re-fetch pin_hash separately because we projected it out
+        full = await db.rooms.find_one({"room_id": r["room_id"]}, {"_id": 0})
+        full_pin_hash = full.get("pin_hash")
+        if mode == "deep":
+            if not pin_hash or pin_hash != full_pin_hash:
+                continue
+        else:  # light
+            # In light mode the PIN is ignored; phrase alone unlocks the room.
+            pass
+        rooms.append(r)
+
     if rooms:
         await db.rooms.update_many(
             {"room_id": {"$in": [r["room_id"] for r in rooms]}},
             {"$set": {"last_active": utcnow(), "session_active": True}},
         )
-    return {"rooms": rooms}
+
+    # If no rooms matched as a member, check if a Light-mode room exists for
+    # this phrase that the user is NOT yet a member of — surface a "request
+    # access" hint so the user can request to join.
+    join_candidate = None
+    if not rooms and not pin_value:
+        candidate = await db.rooms.find_one(
+            {
+                "phrase_hash": p_hash,
+                "status": "active",
+                "security_mode": "light",
+                "members": {"$ne": user.user_id},
+            },
+            {"_id": 0, "phrase_hash": 0, "pin_hash": 0},
+        )
+        if candidate:
+            join_candidate = {
+                "room_id": candidate["room_id"],
+                "name": candidate["name"],
+                "room_type": candidate.get("room_type", "duo"),
+                "security_mode": candidate.get("security_mode", "light"),
+            }
+
+    return {"rooms": rooms, "join_candidate": join_candidate}
+
+
+# ----------- Join-request workflow (Light mode entry) -----------
+@api_router.post("/rooms/{room_id}/request-join")
+async def request_join(room_id: str, user: User = Depends(get_current_user)):
+    room = await db.rooms.find_one({"room_id": room_id}, {"_id": 0})
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    if room.get("status") != "active":
+        raise HTTPException(status_code=410, detail="Room is closed")
+    if user.user_id in room.get("members", []):
+        return {"ok": True, "already_member": True}
+    existing = await db.join_requests.find_one(
+        {
+            "room_id": room_id,
+            "requester_user_id": user.user_id,
+            "status": "pending",
+        },
+        {"_id": 0},
+    )
+    if existing:
+        return {"ok": True, "request_id": existing["request_id"], "already_pending": True}
+    req_id = f"req_{uuid.uuid4().hex[:12]}"
+    await db.join_requests.insert_one(
+        {
+            "request_id": req_id,
+            "room_id": room_id,
+            "requester_user_id": user.user_id,
+            "requester_name": user.name,
+            "requester_email": user.email,
+            "requester_picture": user.picture,
+            "requester_verified": user.verified,
+            "status": "pending",
+            "created_at": utcnow(),
+        }
+    )
+    # Notify owner via WS
+    await ws_manager.broadcast(
+        room_id,
+        {
+            "type": "join_request",
+            "request_id": req_id,
+            "requester_user_id": user.user_id,
+            "requester_name": user.name,
+            "requester_email": user.email,
+        },
+    )
+    return {"ok": True, "request_id": req_id}
+
+
+@api_router.get("/rooms/{room_id}/join-requests")
+async def list_join_requests(room_id: str, user: User = Depends(get_current_user)):
+    room = await db.rooms.find_one({"room_id": room_id}, {"_id": 0})
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    if room["owner_user_id"] != user.user_id:
+        raise HTTPException(status_code=403, detail="Only the owner can view join requests")
+    cursor = db.join_requests.find(
+        {"room_id": room_id, "status": "pending"}, {"_id": 0}
+    ).sort("created_at", -1)
+    items = await cursor.to_list(200)
+    for it in items:
+        if isinstance(it.get("created_at"), datetime):
+            it["created_at"] = it["created_at"].isoformat()
+    return {"requests": items}
+
+
+@api_router.get("/rooms/join-requests/pending")
+async def my_pending_join_requests(user: User = Depends(get_current_user)):
+    """All pending join requests across rooms owned by the caller."""
+    owned_rooms = await db.rooms.find(
+        {"owner_user_id": user.user_id, "status": "active"}, {"_id": 0, "room_id": 1, "name": 1}
+    ).to_list(200)
+    if not owned_rooms:
+        return {"requests": []}
+    room_id_to_name = {r["room_id"]: r.get("name") for r in owned_rooms}
+    cursor = db.join_requests.find(
+        {"room_id": {"$in": list(room_id_to_name.keys())}, "status": "pending"},
+        {"_id": 0},
+    ).sort("created_at", -1)
+    items = await cursor.to_list(200)
+    for it in items:
+        it["room_name"] = room_id_to_name.get(it.get("room_id"))
+        if isinstance(it.get("created_at"), datetime):
+            it["created_at"] = it["created_at"].isoformat()
+    return {"requests": items}
+
+
+@api_router.post("/rooms/{room_id}/join-requests/{request_id}/decision")
+async def decide_join_request(
+    room_id: str,
+    request_id: str,
+    payload: JoinRequestApprovalInput,
+    user: User = Depends(get_current_user),
+):
+    room = await db.rooms.find_one({"room_id": room_id}, {"_id": 0})
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    if room["owner_user_id"] != user.user_id:
+        raise HTTPException(status_code=403, detail="Only the owner can approve / reject")
+    req = await db.join_requests.find_one(
+        {"request_id": request_id, "room_id": room_id, "status": "pending"}, {"_id": 0}
+    )
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found or already decided")
+    if payload.approve:
+        # Capacity check
+        if room["room_type"] == "duo" and len(room.get("members", [])) >= 2:
+            raise HTTPException(status_code=400, detail="Duo room is full")
+        if room["room_type"] == "circle" and len(room.get("members", [])) >= 8:
+            raise HTTPException(status_code=400, detail="Circle room is full")
+        await db.rooms.update_one(
+            {"room_id": room_id}, {"$addToSet": {"members": req["requester_user_id"]}}
+        )
+        await db.join_requests.update_one(
+            {"request_id": request_id},
+            {"$set": {"status": "approved", "decided_at": utcnow(), "decided_by": user.user_id}},
+        )
+        await ws_manager.broadcast(
+            room_id,
+            {
+                "type": "join_request_decided",
+                "request_id": request_id,
+                "requester_user_id": req["requester_user_id"],
+                "approved": True,
+            },
+        )
+        return {"ok": True, "approved": True}
+    else:
+        await db.join_requests.update_one(
+            {"request_id": request_id},
+            {"$set": {"status": "rejected", "decided_at": utcnow(), "decided_by": user.user_id}},
+        )
+        await ws_manager.broadcast(
+            room_id,
+            {
+                "type": "join_request_decided",
+                "request_id": request_id,
+                "requester_user_id": req["requester_user_id"],
+                "approved": False,
+            },
+        )
+        return {"ok": True, "approved": False}
+
+
+@api_router.get("/rooms/my-join-requests")
+async def my_join_requests(user: User = Depends(get_current_user)):
+    """My outgoing join requests."""
+    cursor = db.join_requests.find(
+        {"requester_user_id": user.user_id}, {"_id": 0}
+    ).sort("created_at", -1)
+    items = await cursor.to_list(100)
+    for it in items:
+        if isinstance(it.get("created_at"), datetime):
+            it["created_at"] = it["created_at"].isoformat()
+        if isinstance(it.get("decided_at"), datetime):
+            it["decided_at"] = it["decided_at"].isoformat()
+    return {"requests": items}
 
 
 @api_router.post("/rooms/{room_id}/invite")
@@ -967,24 +1253,23 @@ async def send_message(
         raise HTTPException(status_code=400, detail="Invalid content_type")
     if not payload.content:
         raise HTTPException(status_code=400, detail="Empty content")
-    # Free-tier image quota: 3 images per active session per user.
+    # Free-tier image quota: 3 images per day per user (across all rooms).
     if payload.content_type == "image":
         user_doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
         if not _is_premium_active(user_doc or {}):
-            session_started = room.get("last_ended_at") or room.get("created_at") or utcnow()
+            day_start = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
             count = await db.messages.count_documents(
                 {
-                    "room_id": room_id,
                     "sender_user_id": user.user_id,
                     "content_type": "image",
-                    "created_at": {"$gte": session_started},
+                    "created_at": {"$gte": day_start},
                 }
             )
-            if count >= FREE_IMAGES_PER_SESSION:
+            if count >= FREE_IMAGES_PER_DAY:
                 raise HTTPException(
                     status_code=402,
                     detail=(
-                        f"Free tier allows {FREE_IMAGES_PER_SESSION} images per session. "
+                        f"Free tier allows {FREE_IMAGES_PER_DAY} images per day. "
                         "Upgrade to Consentalk Presence for unlimited media."
                     ),
                 )
@@ -1220,24 +1505,26 @@ async def billing_plans():
         "plans": list(PLANS.values()),
         "free_tier": {
             "rooms_per_day": FREE_ROOMS_PER_DAY,
-            "images_per_session": FREE_IMAGES_PER_SESSION,
+            "images_per_day": FREE_IMAGES_PER_DAY,
             "features": [
                 "Voice phrase access",
                 "Basic encrypted messaging",
                 "Force exit safety tools",
                 "Unlimited room joining",
-                f"{FREE_IMAGES_PER_SESSION} images per session",
+                f"{FREE_IMAGES_PER_DAY} images per day",
                 f"{FREE_ROOMS_PER_DAY} room creation per day",
             ],
         },
+        "trial_days": TRIAL_DAYS,
         "premium_features": [
             "Unlimited room creation",
             "Unlimited media sharing",
-            "Custom room expiration windows",
+            "Uninterrupted room continuity",
+            "Consentalk Deep mode access",
             "Multi-device continuity",
             "Trusted Circles",
             "Priority safety support",
-            "Advanced phrase management",
+            "Premium Presence badge",
         ],
     }
 
@@ -1258,7 +1545,43 @@ async def billing_me(user: User = Depends(get_current_user)):
         "premium_until": until_iso,
         "premium_plan": user_doc.get("premium_plan"),
         "is_admin_unlimited": user.role in ("admin", "super_admin"),
+        "trial_used": bool(user_doc.get("trial_used")),
+        "trial_days": TRIAL_DAYS,
     }
+
+
+@api_router.post("/billing/start-trial")
+async def billing_start_trial(user: User = Depends(get_current_user)):
+    user_doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
+    if not user_doc:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user_doc.get("trial_used"):
+        raise HTTPException(status_code=400, detail="Free trial already used on this account")
+    if _is_premium_active(user_doc):
+        raise HTTPException(status_code=400, detail="You already have an active premium")
+    new_until = utcnow() + timedelta(days=TRIAL_DAYS)
+    await db.users.update_one(
+        {"user_id": user.user_id},
+        {
+            "$set": {
+                "is_premium": True,
+                "premium_plan": "trial",
+                "premium_until": new_until,
+                "trial_used": True,
+                "trial_started_at": utcnow(),
+            }
+        },
+    )
+    await db.billing_events.insert_one(
+        {
+            "event_id": f"bill_{uuid.uuid4().hex[:12]}",
+            "user_id": user.user_id,
+            "type": "trial_start",
+            "premium_until": new_until,
+            "created_at": utcnow(),
+        }
+    )
+    return {"ok": True, "premium_until": new_until.isoformat(), "trial_days": TRIAL_DAYS}
 
 
 @api_router.post("/billing/subscribe")
@@ -1607,6 +1930,112 @@ async def admin_billing_events(admin: User = Depends(require_admin)):
         if isinstance(it.get("premium_until"), datetime):
             it["premium_until"] = it["premium_until"].isoformat()
     return {"events": items}
+
+
+# ---------------------------------------------------------------------------
+# Google Play Billing webhook (signed receipt → entitlement)
+# ---------------------------------------------------------------------------
+class GooglePlayReceipt(BaseModel):
+    product_id: str  # presence_monthly | presence_yearly
+    purchase_token: str
+    order_id: Optional[str] = None
+    purchase_state: int = 1  # 1=purchased, 0=cancelled, 2=pending
+
+
+@api_router.post("/billing/google-play/verify-purchase")
+async def google_play_verify(
+    payload: GooglePlayReceipt, user: User = Depends(get_current_user)
+):
+    """Server-side activation after a Google Play purchase. In production
+    this MUST verify the purchase_token against the Play Developer API using
+    a service account. For MVP we trust the client signal but record the
+    full receipt for auditability + later re-verification.
+    """
+    pid = payload.product_id
+    if pid == "presence_monthly":
+        days = 30
+        plan_id = "monthly_inr"
+    elif pid == "presence_yearly":
+        days = 365
+        plan_id = "yearly_inr"
+    else:
+        raise HTTPException(status_code=400, detail="Unknown product_id")
+
+    if payload.purchase_state != 1:
+        # cancelled / pending → ignore but log
+        await db.billing_events.insert_one(
+            {
+                "event_id": f"bill_{uuid.uuid4().hex[:12]}",
+                "user_id": user.user_id,
+                "type": "gplay_pending_or_cancelled",
+                "product_id": pid,
+                "purchase_token": payload.purchase_token,
+                "state": payload.purchase_state,
+                "created_at": utcnow(),
+            }
+        )
+        return {"ok": False, "state": payload.purchase_state}
+
+    user_doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
+    base = utcnow()
+    existing = (user_doc or {}).get("premium_until")
+    if isinstance(existing, datetime):
+        existing_aware = existing.replace(tzinfo=timezone.utc) if existing.tzinfo is None else existing
+        if existing_aware > base:
+            base = existing_aware
+    new_until = base + timedelta(days=days)
+    await db.users.update_one(
+        {"user_id": user.user_id},
+        {
+            "$set": {
+                "is_premium": True,
+                "premium_plan": plan_id,
+                "premium_until": new_until,
+                "google_play_purchase_token": payload.purchase_token,
+                "google_play_product_id": pid,
+            }
+        },
+    )
+    await db.billing_events.insert_one(
+        {
+            "event_id": f"bill_{uuid.uuid4().hex[:12]}",
+            "user_id": user.user_id,
+            "type": "gplay_purchase",
+            "product_id": pid,
+            "plan_id": plan_id,
+            "purchase_token": payload.purchase_token,
+            "order_id": payload.order_id,
+            "premium_until": new_until,
+            "created_at": utcnow(),
+        }
+    )
+    return {
+        "ok": True,
+        "premium_until": new_until.isoformat(),
+        "plan_id": plan_id,
+    }
+
+
+@api_router.post("/billing/restore")
+async def billing_restore(user: User = Depends(get_current_user)):
+    """Re-syncs billing entitlement from the latest stored receipt.
+    For Google Play, in production this would query the Play Developer API
+    using the stored purchase_token. For MVP we return the current state."""
+    user_doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
+    if not user_doc:
+        raise HTTPException(status_code=404, detail="User not found")
+    active = _is_premium_active(user_doc)
+    until = user_doc.get("premium_until")
+    if isinstance(until, datetime):
+        until_iso = until.isoformat()
+    else:
+        until_iso = until
+    return {
+        "is_premium": active,
+        "premium_until": until_iso,
+        "premium_plan": user_doc.get("premium_plan"),
+        "google_play_product_id": user_doc.get("google_play_product_id"),
+    }
 
 
 # ---------------------------------------------------------------------------

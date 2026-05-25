@@ -8,7 +8,6 @@ import {
   KeyboardAvoidingView,
   Platform,
   Pressable,
-  Alert,
   Image,
   ActivityIndicator,
   Modal,
@@ -22,10 +21,13 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
 import AmbientBackground from "../../src/components/AmbientBackground";
 import { Colors, Radii } from "../../src/lib/theme";
-import { api, getStoredToken, wsUrl } from "../../src/lib/api";
+import { api, backendUrl, getStoredToken, wsUrl } from "../../src/lib/api";
 import { useAuth } from "../../src/contexts/AuthContext";
-import { confirmDialog, notifyDialog, getInitials, gradientFor } from "../../src/lib/confirm";
+import { getInitials, gradientFor } from "../../src/lib/confirm";
 import { useConfirm } from "../../src/contexts/ConfirmContext";
+import ImageViewer from "../../src/components/ImageViewer";
+import JoinRequestsBanner from "../../src/components/JoinRequestsBanner";
+import { startWebRecorder, blobFilename, WebRecorder } from "../../src/lib/webRecorder";
 
 interface Member {
   user_id: string;
@@ -94,6 +96,15 @@ export default function RoomChat() {
   const [screenshotPrompt, setScreenshotPrompt] = useState<ScreenshotPrompt | null>(
     null
   );
+  // Image viewer (full-screen pinch/zoom)
+  const [viewerUri, setViewerUri] = useState<string | null>(null);
+  // Live voice dictation (mic-to-text into the draft)
+  const [dictRecording, setDictRecording] = useState<Audio.Recording | null>(null);
+  const dictWebRef = useRef<WebRecorder | null>(null);
+  const [dictWebRecording, setDictWebRecording] = useState(false);
+  const [dictBusy, setDictBusy] = useState(false);
+  // Cheap ticker to nudge JoinRequestsBanner to refresh on WS events
+  const [joinReqTick, setJoinReqTick] = useState(0);
   const scrollRef = useRef<ScrollView | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -166,6 +177,12 @@ export default function RoomChat() {
                 ...p,
                 `${data.name || "Member"} ${tag} the screenshot.`,
               ]);
+            } else if (
+              data.type === "join_request" ||
+              data.type === "join_request_decided"
+            ) {
+              // refresh banner
+              setJoinReqTick((t) => t + 1);
             }
           } catch {}
         };
@@ -197,7 +214,7 @@ export default function RoomChat() {
       if (!override) setDraft("");
       setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
     } catch (e: any) {
-      Alert.alert("Couldn't send", e?.message || "Try again");
+      await notify("Couldn't send", e?.message || "Try again");
     } finally {
       setSending(false);
     }
@@ -225,17 +242,17 @@ export default function RoomChat() {
         const dataUri = `data:audio/m4a;base64,${b64}`;
         await send({ content_type: "voice", content: dataUri });
       } catch (e: any) {
-        Alert.alert("Voice error", e?.message || "Try again");
+        await notify("Voice error", e?.message || "Try again");
       }
       return;
     }
     if (Platform.OS !== "ios" && Platform.OS !== "android") {
-      Alert.alert("Voice notes are available on the mobile app");
+      await notify("Voice notes are available on the mobile app");
       return;
     }
     const perm = await Audio.requestPermissionsAsync();
     if (!perm.granted) {
-      Alert.alert("Microphone permission needed");
+      await notify("Microphone permission needed");
       return;
     }
     await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
@@ -243,6 +260,103 @@ export default function RoomChat() {
     await rec.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
     await rec.startAsync();
     setRecording(rec);
+  };
+
+  // ---- Voice dictation → transcribe → append to draft ----
+  const startDictation = async () => {
+    if (Platform.OS === "web") {
+      try {
+        const rec = await startWebRecorder();
+        dictWebRef.current = rec;
+        setDictWebRecording(true);
+      } catch (e: any) {
+        await notify(
+          "Microphone unavailable",
+          e?.message || "Please type instead."
+        );
+      }
+      return;
+    }
+    const perm = await Audio.requestPermissionsAsync();
+    if (!perm.granted) {
+      await notify("Microphone permission needed");
+      return;
+    }
+    await Audio.setAudioModeAsync({
+      allowsRecordingIOS: true,
+      playsInSilentModeIOS: true,
+    });
+    const rec = new Audio.Recording();
+    await rec.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+    await rec.startAsync();
+    setDictRecording(rec);
+  };
+
+  const stopDictationAndTranscribe = async () => {
+    setDictBusy(true);
+    try {
+      let blob: Blob | null = null;
+      let filename = "phrase.m4a";
+      if (Platform.OS === "web" && dictWebRef.current) {
+        const rec = dictWebRef.current;
+        dictWebRef.current = null;
+        setDictWebRecording(false);
+        blob = await rec.stop();
+        filename = blobFilename(blob);
+        const form = new FormData();
+        form.append("file", blob, filename);
+        const token = await getStoredToken();
+        const res = await fetch(`${backendUrl()}/api/voice/transcribe`, {
+          method: "POST",
+          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+          body: form,
+        });
+        if (!res.ok) throw new Error(`Transcription failed (${res.status})`);
+        const j = (await res.json()) as { text?: string };
+        const text = (j.text || "").trim();
+        if (text) {
+          setDraft((d) => (d ? `${d} ${text}` : text));
+        } else {
+          await notify("Couldn't detect speech", "Please try again or type.");
+        }
+        return;
+      }
+      if (!dictRecording) return;
+      await dictRecording.stopAndUnloadAsync();
+      const uri = dictRecording.getURI();
+      setDictRecording(null);
+      if (!uri) throw new Error("No recording URI");
+      const form = new FormData();
+      // @ts-ignore RN file
+      form.append("file", { uri, name: "phrase.m4a", type: "audio/m4a" } as any);
+      const token = await getStoredToken();
+      const res = await fetch(`${backendUrl()}/api/voice/transcribe`, {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        body: form,
+      });
+      if (!res.ok) throw new Error(`Transcription failed (${res.status})`);
+      const j = (await res.json()) as { text?: string };
+      const text = (j.text || "").trim();
+      if (text) {
+        setDraft((d) => (d ? `${d} ${text}` : text));
+      } else {
+        await notify("Couldn't detect speech", "Please try again or type.");
+      }
+    } catch (e: any) {
+      await notify("Dictation failed", e?.message || "Try again");
+    } finally {
+      setDictBusy(false);
+    }
+  };
+
+  const onDictateTap = async () => {
+    const isRec = !!dictRecording || dictWebRecording;
+    if (isRec) {
+      await stopDictationAndTranscribe();
+    } else {
+      await startDictation();
+    }
   };
 
   const playVoice = async (m: Message) => {
@@ -263,14 +377,14 @@ export default function RoomChat() {
       });
       await sound.playAsync();
     } catch (e: any) {
-      Alert.alert("Couldn't play", e?.message || "Try again");
+      await notify("Couldn't play", e?.message || "Try again");
     }
   };
 
   const pickImage = async () => {
     const r = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!r.granted) {
-      Alert.alert("Permission needed");
+      await notify("Permission needed");
       return;
     }
     const res = await ImagePicker.launchImageLibraryAsync({
@@ -337,12 +451,12 @@ export default function RoomChat() {
       });
       setInviteValue("");
       setShowInvite(false);
-      Alert.alert(
+      await notify(
         "Invite sent",
         "If they have a Consentalk account, they'll see the invitation."
       );
     } catch (e: any) {
-      Alert.alert("Couldn't invite", e?.message || "Try again");
+      await notify("Couldn't invite", e?.message || "Try again");
     } finally {
       setInviteBusy(false);
     }
@@ -361,7 +475,7 @@ export default function RoomChat() {
       setMemberInfo(u);
     } catch (e: any) {
       setMemberInfo(null);
-      Alert.alert("Couldn't load profile", e?.message || "Try again");
+      await notify("Couldn't load profile", e?.message || "Try again");
     } finally {
       setMemberLoading(false);
     }
@@ -369,7 +483,7 @@ export default function RoomChat() {
 
   const requestScreenshot = () => {
     if (!wsRef.current || wsRef.current.readyState !== 1) {
-      Alert.alert("Not connected — please retry");
+      notify("Not connected", "Please retry");
       return;
     }
     const requestId = `ss_${Date.now()}`;
@@ -480,6 +594,16 @@ export default function RoomChat() {
             contentContainerStyle={styles.body}
             onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
           >
+            {isOwner ? (
+              <JoinRequestsBanner
+                roomId={id || ""}
+                wsTrigger={joinReqTick}
+                onDecision={() => {
+                  // Refresh members list when an approval changes the room
+                  load();
+                }}
+              />
+            ) : null}
             <View style={styles.banner} testID="ephemeral-banner">
               <Ionicons name="time-outline" size={14} color={Colors.brandPrimary} />
               <Text style={styles.bannerText}>
@@ -559,11 +683,19 @@ export default function RoomChat() {
                         {m.content}
                       </Text>
                     ) : m.content_type === "image" ? (
-                      <Image
-                        source={{ uri: m.content }}
-                        style={styles.imageMsg}
-                        resizeMode="cover"
-                      />
+                      <Pressable
+                        onPress={() => setViewerUri(m.content)}
+                        testID={`open-image-${m.message_id}`}
+                      >
+                        <Image
+                          source={{ uri: m.content }}
+                          style={styles.imageMsg}
+                          resizeMode="cover"
+                        />
+                        <View style={styles.imageOverlay} pointerEvents="none">
+                          <Ionicons name="expand-outline" size={14} color="#FFFFFF" />
+                        </View>
+                      </Pressable>
                     ) : (
                       <Pressable
                         style={[
@@ -600,6 +732,35 @@ export default function RoomChat() {
           <View style={styles.composer}>
             <Pressable testID="image-btn" style={styles.compIcon} onPress={pickImage}>
               <Ionicons name="image-outline" size={20} color={Colors.brandPrimary} />
+            </Pressable>
+            <Pressable
+              testID="dictate-btn"
+              style={[
+                styles.compIcon,
+                (dictRecording || dictWebRecording) && { backgroundColor: Colors.dangerBg },
+              ]}
+              onPress={onDictateTap}
+              disabled={dictBusy}
+              // @ts-ignore web title
+              title="Dictate speech into the message"
+            >
+              {dictBusy ? (
+                <ActivityIndicator color={Colors.brandPrimary} size="small" />
+              ) : (
+                <Ionicons
+                  name={
+                    dictRecording || dictWebRecording
+                      ? "stop-circle"
+                      : "chatbubble-ellipses-outline"
+                  }
+                  size={20}
+                  color={
+                    dictRecording || dictWebRecording
+                      ? Colors.danger
+                      : Colors.brandPrimary
+                  }
+                />
+              )}
             </Pressable>
             <View style={styles.inputWrap}>
               <TextInput
@@ -888,6 +1049,9 @@ export default function RoomChat() {
             </View>
           </View>
         </Modal>
+
+        {/* Full-screen Image Viewer */}
+        <ImageViewer uri={viewerUri} onClose={() => setViewerUri(null)} />
       </SafeAreaView>
     </AmbientBackground>
   );
@@ -1016,6 +1180,17 @@ const styles = StyleSheet.create({
   },
   bubbleText: { fontSize: 15, lineHeight: 21 },
   imageMsg: { width: 220, height: 220, borderRadius: 12 },
+  imageOverlay: {
+    position: "absolute",
+    top: 8,
+    right: 8,
+    width: 26,
+    height: 26,
+    borderRadius: 26,
+    backgroundColor: "rgba(0,0,0,0.45)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
   voiceBtn: {
     flexDirection: "row",
     alignItems: "center",

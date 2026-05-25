@@ -22,8 +22,9 @@ import { api, backendUrl, getStoredToken } from "../../src/lib/api";
 import { useConfirm } from "../../src/contexts/ConfirmContext";
 import { startWebRecorder, blobFilename, WebRecorder } from "../../src/lib/webRecorder";
 
-type Step = "name" | "phrase" | "pin" | "type" | "review";
+type Step = "name" | "phrase" | "mode" | "pin" | "type" | "review";
 type RoomType = "duo" | "circle";
+type SecurityMode = "light" | "deep";
 
 export default function CreateRoom() {
   const router = useRouter();
@@ -33,8 +34,8 @@ export default function CreateRoom() {
   const [phrase, setPhrase] = useState("");
   const [pin, setPin] = useState("");
   const [roomType, setRoomType] = useState<RoomType>("duo");
+  const [securityMode, setSecurityMode] = useState<SecurityMode>("light");
   const [busy, setBusy] = useState(false);
-  // Voice phrase recording
   const [recording, setRecording] = useState<Audio.Recording | null>(null);
   const webRecRef = useRef<WebRecorder | null>(null);
   const [webRecording, setWebRecording] = useState(false);
@@ -46,7 +47,10 @@ export default function CreateRoom() {
       setStep("phrase");
     } else if (step === "phrase") {
       if (phrase.trim().length < 3) return notify("Phrase too short");
-      setStep("pin");
+      setStep("mode");
+    } else if (step === "mode") {
+      if (securityMode === "deep") setStep("pin");
+      else setStep("type");
     } else if (step === "pin") {
       if (pin.length < 4) return notify("PIN must be 4–6 digits");
       setStep("type");
@@ -57,8 +61,9 @@ export default function CreateRoom() {
 
   const back = () => {
     if (step === "phrase") setStep("name");
-    else if (step === "pin") setStep("phrase");
-    else if (step === "type") setStep("pin");
+    else if (step === "mode") setStep("phrase");
+    else if (step === "pin") setStep("mode");
+    else if (step === "type") setStep(securityMode === "deep" ? "pin" : "mode");
     else if (step === "review") setStep("type");
     else router.back();
   };
@@ -66,16 +71,34 @@ export default function CreateRoom() {
   const submit = async () => {
     setBusy(true);
     try {
+      const body: any = {
+        name,
+        phrase,
+        room_type: roomType,
+        security_mode: securityMode,
+      };
+      if (securityMode === "deep") body.pin = pin;
       const r = await api<{ room_id: string; name: string }>("/rooms/create", {
-        body: { name, phrase, pin, room_type: roomType },
+        body,
       });
       await notify(
         "Room created",
-        "Share the phrase + PIN with the people you trust. They will only see the room when they speak the phrase."
+        securityMode === "light"
+          ? "Share the phrase with the people you trust. They'll request access; you approve or reject from inside the room."
+          : "Share the phrase + PIN with the people you trust. They will only see the room when they speak the phrase."
       );
       router.replace(`/room/${r.room_id}`);
     } catch (e: any) {
-      await notify("Could not create room", e?.message || "Try again");
+      const msg = e?.message || "Try again";
+      if (msg.includes("Room already allocated") || msg.includes("already used")) {
+        await notify(
+          "Phrase already taken",
+          "Room already allocated. Please use a more unique phrase. Try adding more words for uniqueness."
+        );
+        setStep("phrase");
+      } else {
+        await notify("Could not create room", msg);
+      }
     } finally {
       setBusy(false);
     }
@@ -287,11 +310,61 @@ export default function CreateRoom() {
               </View>
             )}
 
+            {step === "mode" && (
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Step 3 — Security mode</Text>
+                <Text style={styles.cardHint}>
+                  Light is open — anyone with the phrase can request access and
+                  you approve. Deep also requires a secret PIN for entry.
+                </Text>
+                {(["light", "deep"] as SecurityMode[]).map((m) => (
+                  <Pressable
+                    key={m}
+                    onPress={() => setSecurityMode(m)}
+                    style={[
+                      styles.roomTypeCard,
+                      securityMode === m && styles.roomTypeCardActive,
+                    ]}
+                    testID={`security-mode-${m}`}
+                  >
+                    <View style={styles.roomTypeIcon}>
+                      <Ionicons
+                        name={m === "light" ? "leaf-outline" : "lock-closed-outline"}
+                        size={26}
+                        color={Colors.brandPrimary}
+                      />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.roomTypeTitle}>
+                        {m === "light" ? "Light · Consentalk" : "Deep · Presence Vault"}
+                      </Text>
+                      <Text style={styles.roomTypeText}>
+                        {m === "light"
+                          ? "Phrase only. Join requests need your approval."
+                          : "Phrase + PIN. Members never need to ask twice."}
+                      </Text>
+                    </View>
+                    <Ionicons
+                      name={securityMode === m ? "radio-button-on" : "radio-button-off"}
+                      color={securityMode === m ? Colors.brandPrimary : Colors.textTertiary}
+                      size={22}
+                    />
+                  </Pressable>
+                ))}
+                <Button
+                  testID="step-next-mode"
+                  label="Continue"
+                  onPress={next}
+                  icon="arrow-forward"
+                />
+              </View>
+            )}
+
             {step === "pin" && (
               <View style={styles.card}>
-                <Text style={styles.cardTitle}>Step 3 / 4 — Room PIN</Text>
+                <Text style={styles.cardTitle}>Step 4 — Room PIN</Text>
                 <Text style={styles.cardHint}>
-                  4–6 digits. Same phrase + different PIN = a separate room.
+                  4–6 digits. Required for Deep mode.
                 </Text>
                 <PinDots length={6} filled={pin.length} testID="create-pin-dots" />
                 <View style={styles.pinPad}>
@@ -390,9 +463,17 @@ export default function CreateRoom() {
                   <Text style={styles.reviewValue}>{phrase}</Text>
                 </View>
                 <View style={styles.reviewRow}>
-                  <Text style={styles.reviewLabel}>PIN</Text>
-                  <Text style={styles.reviewValue}>{"•".repeat(pin.length)}</Text>
+                  <Text style={styles.reviewLabel}>Mode</Text>
+                  <Text style={styles.reviewValue}>
+                    {securityMode === "light" ? "Light (phrase only)" : "Deep (phrase + PIN)"}
+                  </Text>
                 </View>
+                {securityMode === "deep" ? (
+                  <View style={styles.reviewRow}>
+                    <Text style={styles.reviewLabel}>PIN</Text>
+                    <Text style={styles.reviewValue}>{"•".repeat(pin.length)}</Text>
+                  </View>
+                ) : null}
                 <View style={styles.reviewRow}>
                   <Text style={styles.reviewLabel}>Type</Text>
                   <Text style={styles.reviewValue}>
@@ -400,7 +481,7 @@ export default function CreateRoom() {
                   </Text>
                 </View>
                 <Text style={[styles.cardHint, { marginTop: 12 }]}>
-                  Phrase and PIN are stored as one-way hashes. We can't recover them.
+                  Phrase{securityMode === "deep" ? " and PIN are" : " is"} stored as one-way hash{securityMode === "deep" ? "es" : ""}. We can't recover them.
                 </Text>
                 <Button
                   testID="create-room-submit"
