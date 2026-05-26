@@ -1,0 +1,34 @@
+{
+  "summary": "Iteration 8 frontend retest (smart-keypad summon + re-summon-on-exit). All 5 previously-listed scenarios now PASS after restarting expo to bundle the latest code. The previously failing DEEP PIN flow is fixed: tapping 'Summon room' after entering PIN posts {phrase, pin} to /api/rooms/summon (verified by intercepting the request: body = '{\"phrase\":\"midnight harbor sky a799\",\"pin\":\"4567\"}'). The matching Deep room is returned and tapping the room card navigates to /room/<room_id>. Back navigation resets the home screen to idle (phrase-input no longer visible). LIGHT phrase performs phrase-only summon, keypad does NOT appear, and the Light room card is shown. Premium screen renders without red-screen and shows currency toggle + Monthly/Yearly plans. Backend pytest was NOT rerun per main-agent instruction. Note: Metro is running in CI mode (reloads disabled), so an expo restart is required for every frontend code change before testing.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": [
+      {"component": "expo-av", "issue": "Deprecated package still in use. /app/frontend/app/(tabs)/index.tsx:15 imports `Audio` from 'expo-av'. Migrate to expo-audio (recording) and expo-video. Console emits the deprecation warning on every screen load."}
+    ]
+  },
+  "test_report_links": [
+    "/tmp/seed_iter9.py",
+    "/tmp/after_summon.png",
+    "/tmp/premium2.png"
+  ],
+  "action_items": [
+    "Migrate expo-av usage in /app/frontend/app/(tabs)/index.tsx to expo-audio (recording) and expo-video before SDK 54.",
+    "Optional: convert Metro CI mode → watch mode in development so frontend code changes hot-reload without an expo restart."
+  ],
+  "critical_code_review_comments": [
+    "summonWithPin() correctly reads phrase + pin from state and POSTs {phrase, pin} (verified at runtime).",
+    "useFocusEffect on the Home screen resets all state on every focus — meets the re-summon-on-exit requirement.",
+    "Phrase-only summon path is unchanged for Light rooms and still does not surface the keypad.",
+    "All new interactive elements have testID (mic-orb, type-phrase-btn, phrase-input, phrase-continue-btn, summon-pin-dots, pin-key-*, summon-btn, room-card-*, leave-room-*)."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "not_retested (16/16 prior PASS)", "frontend": "100% (5/5 scenarios)"},
+  "seed_data_creation": "Seeded user user_7a8ab7e14897 with session test_sess_bfc66d275b6f4caf, plus a Light room ('silver ocean tonight c60a') and a Deep room ('midnight harbor sky a799', PIN 4567). All seed data cleaned up after the run.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Whenever you change frontend source, run `sudo supervisorctl restart expo` and wait ~10s before re-testing — Metro is started with CI=true (reloads disabled), so an in-place reload of the page will keep serving the stale bundle. To seed an authenticated session on web, set localStorage key 'consentalk.session_token' BEFORE navigating to the in-app route (the first navigation to '/' without a token redirects to '/auth' and the auth screen does not auto-redirect back even if a token appears later). Use page.goto('/') then evaluate setItem then page.goto('/') again. Reference seed script: /tmp/seed_iter9.py.",
+  "rca_of_issue": "Iteration 6 reported the keypad summon POST omitted the PIN because onPress={summon} on the Button passed the React-Native GestureResponderEvent as the first positional arg, which collided with summon's skipPin default param and short-circuited the Deep flow. Main agent's fix renamed summon → summonWithPin, removed the positional arg, and reads phrase/pin directly from component state. Verified at runtime by intercepting the network request: second /api/rooms/summon body is '{\"phrase\":\"…\",\"pin\":\"4567\"}'."
+}

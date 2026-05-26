@@ -260,7 +260,7 @@ export default function HomeScreen() {
     setError(null);
     // Try phrase-only summon first. The backend tells us whether a PIN is
     // actually required (Deep mode) — only then do we surface the keypad.
-    await summon(true, /* fromPhraseStep */ true);
+    await tryPhraseOnlySummon(phrase);
   };
 
   const onPinKey = (digit: string) => {
@@ -272,8 +272,9 @@ export default function HomeScreen() {
     setPin((p) => p + digit);
   };
 
-  const summon = async (skipPin = false, fromPhraseStep = false) => {
-    if (!skipPin && pin.length < 4) {
+  // Called only AFTER the user has entered a PIN on the keypad.
+  const summonWithPin = async () => {
+    if (pin.length < 4) {
       setError("PIN must be 4–6 digits.");
       return;
     }
@@ -281,29 +282,13 @@ export default function HomeScreen() {
     setBusy(true);
     setJoinCandidate(null);
     setJoinSent(false);
-    if (!fromPhraseStep) setStep("summoning");
+    setStep("summoning");
     try {
       const r = await api<{
         rooms: RoomCard[];
         join_candidate: JoinCandidate | null;
         pin_required?: boolean;
-      }>("/rooms/summon", { body: skipPin ? { phrase } : { phrase, pin } });
-
-      // If the backend indicates a PIN is required (Deep-mode membership
-      // with this phrase) and we haven't asked for one yet, jump to the
-      // keypad instead of showing an empty results screen.
-      if (
-        skipPin &&
-        r.pin_required &&
-        (!r.rooms || r.rooms.length === 0) &&
-        !r.join_candidate
-      ) {
-        setBusy(false);
-        setStep("pin");
-        setError(null);
-        return;
-      }
-
+      }>("/rooms/summon", { body: { phrase, pin } });
       setResults(r.rooms || []);
       setJoinCandidate(r.join_candidate || null);
       setStep("results");
@@ -446,7 +431,7 @@ export default function HomeScreen() {
                           label={busy ? "Summoning…" : "Summon room"}
                           icon="sparkles-outline"
                           loading={busy}
-                          onPress={summon}
+                          onPress={summonWithPin}
                         />
                       </>
                     ) : (
