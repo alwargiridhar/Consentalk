@@ -103,6 +103,85 @@
 #====================================================================================================
 
 user_problem_statement: |
+  Iteration 8 — Smart-keypad summon + re-summon-on-exit:
+  1. After typing/speaking the phrase the keypad should be SKIPPED automatically when the room
+     creator did NOT set a PIN (Light mode). Only Deep-mode rooms (creator added a PIN) should
+     surface the PIN keypad on the joiner's device.
+  2. When the user exits the chat room (creator OR joiner — via End, Leave, back button, force-exit)
+     they must NOT see the previously-summoned room cards on the home tab. They must re-enter the
+     phrase (and PIN if Deep) to come back. Implemented via useFocusEffect on the home tab — every
+     time the home tab regains focus the summon state is fully reset.
+
+backend:
+  - task: "Add pin_required flag to POST /api/rooms/summon"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "When a phrase-only summon yields no Light-mode match and no join_candidate, we now check whether the requesting user is a MEMBER of a Deep-mode room with the same phrase_hash; if so we return pin_required=true. We never disclose room existence to non-members."
+
+frontend:
+  - task: "Auto phrase-only summon + conditional PIN keypad"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/(tabs)/index.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "onPhraseContinue and the voice transcribe paths now call summon(skipPin=true) first. If backend returns pin_required=true, we jump to step='pin' and show the keypad; otherwise we go straight to results (Light room) or to the join-candidate card."
+
+  - task: "useFocusEffect resets home tab so exiting chat requires re-summon"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/(tabs)/index.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Added useFocusEffect that clears step/phrase/pin/results/joinCandidate every time the home tab regains focus. Exiting a chat room (any way) returns the user to the clean idle prompt — previously-visible room cards are gone."
+
+  - task: "Previous Iteration 7 features (Premium trial, Image viewer, Join approvals, Voice dictation)"
+    implemented: true
+    working: true
+    file: "various"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "Already validated by testing agent 10/10 in iteration 7. No code changes since."
+
+metadata:
+  created_by: "main_agent"
+  version: "8.0"
+  test_sequence: 6
+  run_ui: false
+
+test_plan:
+  current_focus:
+    - "Add pin_required flag to POST /api/rooms/summon"
+    - "Auto phrase-only summon + conditional PIN keypad"
+    - "useFocusEffect resets home tab so exiting chat requires re-summon"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: "Iteration 8 ready. Backend: please verify the new pin_required behaviour on /api/rooms/summon. Frontend: please verify that summoning a Light-mode room never shows the keypad, summoning a Deep-mode room (as member) shows the keypad only after the phrase-only call, and that after exiting any room the home tab no longer shows a room card (forces a re-summon)."
+
+user_problem_statement: |
   Iteration 7 — Frontend wiring of the new backend features completed in Iteration 6:
   1. Wire up full-screen Image Viewer (pinch-to-zoom, swipe to close) in chat room.
   2. Wire up Google Play Billing UI in premium screen, with a 3-day free trial CTA before charging.

@@ -1,0 +1,66 @@
+{
+  "summary": "Iteration-8 smart-keypad summon: all 6 backend scenarios PASS (pytest 16/16 incl. iter7 regression). Frontend mobile UI verified: LIGHT phrase skips keypad and shows room card; leaving a room via back button correctly resets the home tab to the idle state; DEEP phrase correctly shows the PIN keypad. However, one functional bug found: after entering the PIN and tapping 'Summon room', the DEEP room is NOT returned because the frontend passes the GestureResponderEvent as the `skipPin` argument (onPress={summon}), which makes the request body omit the `pin` field. Backend confirmed working via direct curl with the same phrase+pin.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "app/(tabs)/index.tsx - Summon button (DEEP mode)",
+        "issue": "onPress={summon} passes the press event as the first arg (skipPin), causing the request body to drop the `pin` field. Result: backend returns rooms=[], pin_required=true and the keypad stays. Fix: change to onPress={() => summon()} on line 449.",
+        "testID": "summon-btn",
+        "priority": "HIGH"
+      }
+    ],
+    "integration_issues": [
+      {
+        "flow": "DEEP room summon (phrase -> keypad -> PIN -> summon)",
+        "issue": "Backend receives request without `pin` field even though user entered a 4+ digit PIN. Verified via page.expect_response: POST /api/rooms/summon returns {rooms:[], join_candidate:null, pin_required:true} for the user's own Deep room when they should have unlocked it. Direct curl with the same {phrase, pin} returns the room correctly, confirming the bug is purely frontend.",
+        "affected_testIDs": ["summon-btn", "pin-key-*"]
+      }
+    ],
+    "design_issues": [],
+    "react_native_issues": [
+      {
+        "component": "expo-av",
+        "issue": "Deprecated package warning in expo logs and console: '[expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the `expo-audio` and `expo-video` packages.' Reference: frontend uses expo-av; should migrate to expo-audio / expo-video."
+      },
+      {
+        "component": "Image.style.resizeMode",
+        "issue": "Console warning: 'Image: style.resizeMode is deprecated. Please use props.resizeMode.' Reference: some <Image> usage in frontend (multiple screens emit this on render)."
+      },
+      {
+        "component": "View.props.pointerEvents",
+        "issue": "Console warning: 'props.pointerEvents is deprecated. Use style.pointerEvents.' Reference: index.tsx or shared component using <View pointerEvents=...>."
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration8_features.py",
+    "/app/test_reports/pytest/iter8_results.xml"
+  ],
+  "action_items": [
+    "Fix /app/frontend/app/(tabs)/index.tsx line 449: change `onPress={summon}` to `onPress={() => summon()}` so the press event is not passed as the `skipPin` boolean. This currently breaks every Deep-mode summon.",
+    "Audit other `onPress={fnWithDefaults}` patterns in the same file (and codebase) for the same trap. Same concern applies wherever a callback has default arg values (e.g., leaveRoom, summon helpers).",
+    "Migrate expo-av to expo-audio / expo-video (expo-av deprecated in SDK 54).",
+    "Replace Image style.resizeMode with props.resizeMode.",
+    "Replace deprecated View pointerEvents prop with style.pointerEvents."
+  ],
+  "critical_code_review_comments": [
+    "server.py /rooms/summon (lines 718-800): logic is correct and privacy-safe — `pin_required` is only set when the user is a MEMBER of a Deep room with that phrase; non-members get `pin_required=False` for both unmatched and Deep-room-they-don't-know-about phrases. Verified by test_deep_non_member_no_pin_leak.",
+    "Frontend `summon` callback design is fragile: it accepts `(skipPin=false, fromPhraseStep=false)` and is used both as a direct handler (which breaks) and as a programmatic call. Recommend either: (a) always wrap in arrow, or (b) split into two named functions `summonWithPin()` and `summonPhraseOnly()`."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration8_features.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (16/16 pytest including iter7 regression)",
+    "frontend": "80% (4/5 critical flows: LIGHT skip-keypad ✓, leave-room reset ✓, DEEP keypad appears ✓, premium regression ✓; DEEP PIN unlock ✗ due to onPress bug)"
+  },
+  "seed_data_creation": "Temporary test user user_af7a8d9037e2 with one Light room (phrase 'silver ocean tonight 2df4') and one Deep room (phrase 'midnight harbor sky 72c4', PIN '4567') was seeded for the manual UI flow, then cleaned up after testing.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iteration-8 backend is fully verified by /app/backend/tests/test_iteration8_features.py (6 tests). On retest, focus on the DEEP PIN summon flow once the onPress arrow-wrap fix lands. To reproduce: seed a Deep room owned by a test user with a known PIN, log in, type the phrase, press the digit keys, press 'Summon room' (testID=summon-btn). Use page.expect_response on /api/rooms/summon and assert request post body contains both `phrase` AND `pin`. Premium screen testIDs trial-card / start-trial-btn render only when user is NOT premium and !trial_used — use a fresh non-premium user (see fresh_user fixture in test_iteration7_features.py) for that regression.",
+  "rca_of_issue": "Root cause: in /app/frontend/app/(tabs)/index.tsx line 449, `onPress={summon}` directly references the function `summon(skipPin=false, fromPhraseStep=false)`. React Native's Pressable/Button invokes onPress with a GestureResponderEvent as the first argument. JavaScript then binds that event object to `skipPin`. Because the event object is truthy, two things go wrong: (1) the validation `if (!skipPin && pin.length < 4)` is bypassed; (2) the ternary `body: skipPin ? { phrase } : { phrase, pin }` evaluates to `{phrase}`, dropping the user's PIN. The backend therefore sees a phrase-only request and correctly answers `{rooms:[], pin_required:true}`. Mitigation: wrap as `onPress={() => summon()}` (or `onPress={() => summon(false)}`). Verified by capturing the POST /api/rooms/summon response via Playwright `page.expect_response`: body was `{rooms:[], join_candidate:null, pin_required:true}` and a direct curl with `{phrase, pin:'4567'}` returned the Deep room — proving backend works and the regression is purely frontend."
+}

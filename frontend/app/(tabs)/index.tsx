@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useCallback } from "react";
 import {
   View,
   Text,
@@ -9,12 +9,11 @@ import {
   Pressable,
   ScrollView,
   ActivityIndicator,
-  Alert,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { Audio } from "expo-av";
-import { useRouter } from "expo-router";
+import { useRouter, useFocusEffect } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import AmbientBackground from "../../src/components/AmbientBackground";
 import MicrophoneOrb from "../../src/components/MicrophoneOrb";
@@ -67,8 +66,30 @@ export default function HomeScreen() {
     setPhrase("");
     setPin("");
     setResults([]);
+    setJoinCandidate(null);
+    setJoinSent(false);
     setError(null);
   };
+
+  // Reset the home screen whenever the user comes back to this tab.
+  // This ensures: leaving / ending / back-navigating out of a room always
+  // returns to the clean idle prompt — the previously-summoned rooms must
+  // be re-summoned with the phrase (+ PIN if Deep mode) again.
+  useFocusEffect(
+    useCallback(() => {
+      // Reset on every focus AFTER the first mount. We always clear so
+      // exiting a room never leaves the previously-visible room card behind.
+      setStep("idle");
+      setPhrase("");
+      setPin("");
+      setResults([]);
+      setJoinCandidate(null);
+      setJoinSent(false);
+      setError(null);
+      return () => {};
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [])
+  );
 
   const startListening = async () => {
     setError(null);
@@ -108,6 +129,42 @@ export default function HomeScreen() {
     }
   };
 
+  // Performs a phrase-only summon. The backend tells us whether the room
+  // requires a PIN (Deep mode) — only then do we surface the keypad.
+  const tryPhraseOnlySummon = async (rawPhrase: string) => {
+    const ph = (rawPhrase || "").trim();
+    if (ph.length < 3) {
+      setError("Phrase must be at least 3 characters.");
+      setStep("phrase");
+      return;
+    }
+    setError(null);
+    setBusy(true);
+    setJoinCandidate(null);
+    setJoinSent(false);
+    try {
+      const r = await api<{
+        rooms: RoomCard[];
+        join_candidate: JoinCandidate | null;
+        pin_required?: boolean;
+      }>("/rooms/summon", { body: { phrase: ph } });
+
+      if (r.pin_required && (!r.rooms || r.rooms.length === 0) && !r.join_candidate) {
+        // Deep room with this phrase exists and user is a member — ask for PIN
+        setStep("pin");
+        return;
+      }
+      setResults(r.rooms || []);
+      setJoinCandidate(r.join_candidate || null);
+      setStep("results");
+    } catch (e: any) {
+      setError(e?.message || "Summoning failed");
+      setStep("results");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const transcribeBlob = async (blob: Blob, filename: string) => {
     setTranscribing(true);
     try {
@@ -124,7 +181,7 @@ export default function HomeScreen() {
       const text = (j.text || "").trim();
       if (!text) throw new Error("Could not detect a phrase. Please type instead.");
       setPhrase(text);
-      setStep("pin");
+      await tryPhraseOnlySummon(text);
     } catch (e: any) {
       setError(e?.message || "Transcription failed. Please type instead.");
       setStep("phrase");
@@ -169,7 +226,7 @@ export default function HomeScreen() {
       const text = (j.text || "").trim();
       if (!text) throw new Error("Could not detect a phrase. Please type instead.");
       setPhrase(text);
-      setStep("pin");
+      await tryPhraseOnlySummon(text);
     } catch (e: any) {
       setError(e?.message || "Transcription failed");
       setStep("phrase");
@@ -195,13 +252,15 @@ export default function HomeScreen() {
     setTimeout(() => phraseRef.current?.focus(), 50);
   };
 
-  const onPhraseContinue = () => {
+  const onPhraseContinue = async () => {
     if (phrase.trim().length < 3) {
       setError("Phrase must be at least 3 characters.");
       return;
     }
     setError(null);
-    setStep("pin");
+    // Try phrase-only summon first. The backend tells us whether a PIN is
+    // actually required (Deep mode) — only then do we surface the keypad.
+    await summon(true, /* fromPhraseStep */ true);
   };
 
   const onPinKey = (digit: string) => {
@@ -213,21 +272,38 @@ export default function HomeScreen() {
     setPin((p) => p + digit);
   };
 
-  const summon = async (skipPin = false) => {
+  const summon = async (skipPin = false, fromPhraseStep = false) => {
     if (!skipPin && pin.length < 4) {
-      setError("PIN must be 4–6 digits, or tap 'No PIN — Light room'.");
+      setError("PIN must be 4–6 digits.");
       return;
     }
     setError(null);
     setBusy(true);
     setJoinCandidate(null);
     setJoinSent(false);
-    setStep("summoning");
+    if (!fromPhraseStep) setStep("summoning");
     try {
-      const r = await api<{ rooms: RoomCard[]; join_candidate: JoinCandidate | null }>(
-        "/rooms/summon",
-        { body: skipPin ? { phrase } : { phrase, pin } }
-      );
+      const r = await api<{
+        rooms: RoomCard[];
+        join_candidate: JoinCandidate | null;
+        pin_required?: boolean;
+      }>("/rooms/summon", { body: skipPin ? { phrase } : { phrase, pin } });
+
+      // If the backend indicates a PIN is required (Deep-mode membership
+      // with this phrase) and we haven't asked for one yet, jump to the
+      // keypad instead of showing an empty results screen.
+      if (
+        skipPin &&
+        r.pin_required &&
+        (!r.rooms || r.rooms.length === 0) &&
+        !r.join_candidate
+      ) {
+        setBusy(false);
+        setStep("pin");
+        setError(null);
+        return;
+      }
+
       setResults(r.rooms || []);
       setJoinCandidate(r.join_candidate || null);
       setStep("results");

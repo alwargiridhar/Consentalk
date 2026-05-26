@@ -759,6 +759,7 @@ async def summon_room(payload: SummonRoomInput, user: User = Depends(get_current
     # this phrase that the user is NOT yet a member of — surface a "request
     # access" hint so the user can request to join.
     join_candidate = None
+    pin_required = False
     if not rooms and not pin_value:
         candidate = await db.rooms.find_one(
             {
@@ -776,8 +777,27 @@ async def summon_room(payload: SummonRoomInput, user: User = Depends(get_current
                 "room_type": candidate.get("room_type", "duo"),
                 "security_mode": candidate.get("security_mode", "light"),
             }
+        else:
+            # No Light-mode match — check whether this user is a MEMBER of a
+            # Deep-mode room with this phrase. Only then do we admit that a
+            # PIN is required (we never disclose room existence to non-members).
+            deep_member = await db.rooms.find_one(
+                {
+                    "phrase_hash": p_hash,
+                    "status": "active",
+                    "security_mode": "deep",
+                    "members": user.user_id,
+                },
+                {"_id": 0},
+            )
+            if deep_member:
+                pin_required = True
 
-    return {"rooms": rooms, "join_candidate": join_candidate}
+    return {
+        "rooms": rooms,
+        "join_candidate": join_candidate,
+        "pin_required": pin_required,
+    }
 
 
 # ----------- Join-request workflow (Light mode entry) -----------
