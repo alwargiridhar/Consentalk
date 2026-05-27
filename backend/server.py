@@ -25,6 +25,7 @@ import hashlib
 import uuid
 import base64
 import tempfile
+import asyncio
 from pathlib import Path
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
@@ -257,6 +258,11 @@ class CreateRoomInput(BaseModel):
     pin: Optional[str] = None  # optional in Light mode, required in Deep
     room_type: str = "duo"
     security_mode: str = "light"  # "light" (phrase only) | "deep" (phrase + pin)
+    # Retention: one of "5min" | "10min" | "15min" | "on_refresh".
+    # "on_refresh" → messages persist until anyone hits the wipe button or
+    # leaves/ends the room. Time-based modes auto-delete N minutes after the
+    # message has been read by all other members.
+    retention_mode: str = "10min"
 
 
 class SummonRoomInput(BaseModel):
@@ -267,6 +273,10 @@ class SummonRoomInput(BaseModel):
 class RoomSecurityInput(BaseModel):
     security_mode: str
     pin: Optional[str] = None  # required when switching to deep
+
+
+class RoomSettingsInput(BaseModel):
+    retention_mode: Optional[str] = None  # "5min" | "10min" | "15min" | "on_refresh"
 
 
 class JoinRequestApprovalInput(BaseModel):
@@ -652,6 +662,10 @@ async def create_room(payload: CreateRoomInput, user: User = Depends(get_current
             )
 
     room_id = f"room_{uuid.uuid4().hex[:14]}"
+    # Validate retention mode
+    rmode = (payload.retention_mode or "10min").strip()
+    if rmode not in ("5min", "10min", "15min", "on_refresh"):
+        rmode = "10min"
     await db.rooms.insert_one(
         {
             "room_id": room_id,
@@ -659,6 +673,7 @@ async def create_room(payload: CreateRoomInput, user: User = Depends(get_current
             "name": payload.name.strip() or "Untitled Room",
             "room_type": payload.room_type,
             "security_mode": payload.security_mode,
+            "retention_mode": rmode,
             "phrase_hash": hash_phrase(phrase_norm),
             "pin_hash": pin_hash,
             "members": [user.user_id],
@@ -673,6 +688,7 @@ async def create_room(payload: CreateRoomInput, user: User = Depends(get_current
         "name": payload.name,
         "room_type": payload.room_type,
         "security_mode": payload.security_mode,
+        "retention_mode": rmode,
     }
 
 
@@ -713,6 +729,70 @@ async def change_room_security(
         update["pin_hash"] = None
     await db.rooms.update_one({"room_id": room_id}, {"$set": update})
     return {"ok": True, "security_mode": payload.security_mode}
+
+
+# Retention modes accepted: "5min", "10min", "15min", "on_refresh"
+_RETENTION_MODES = ("5min", "10min", "15min", "on_refresh")
+_RETENTION_MINUTES = {"5min": 5, "10min": 10, "15min": 15}
+
+
+@api_router.patch("/rooms/{room_id}/settings")
+async def update_room_settings(
+    room_id: str,
+    payload: RoomSettingsInput,
+    user: User = Depends(get_current_user),
+):
+    """Owner-only — change room settings (currently just retention_mode)."""
+    room = await db.rooms.find_one({"room_id": room_id}, {"_id": 0})
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    if room["owner_user_id"] != user.user_id:
+        raise HTTPException(
+            status_code=403, detail="Only the owner can change room settings"
+        )
+    update: Dict[str, Any] = {}
+    if payload.retention_mode is not None:
+        if payload.retention_mode not in _RETENTION_MODES:
+            raise HTTPException(status_code=400, detail="Invalid retention_mode")
+        update["retention_mode"] = payload.retention_mode
+    if not update:
+        return {"ok": True, "retention_mode": room.get("retention_mode", "10min")}
+    await db.rooms.update_one({"room_id": room_id}, {"$set": update})
+    # Broadcast the new setting so clients can update their UI immediately.
+    await ws_manager.broadcast(
+        room_id,
+        {
+            "type": "settings_updated",
+            "retention_mode": update.get(
+                "retention_mode", room.get("retention_mode", "10min")
+            ),
+        },
+    )
+    return {"ok": True, **update}
+
+
+@api_router.post("/rooms/{room_id}/wipe")
+async def wipe_room_messages(
+    room_id: str, user: User = Depends(get_current_user)
+):
+    """Any member can trigger a 'refresh & wipe' — instantly deletes all
+    messages currently in the room (used by the 'on_refresh' retention
+    mode). This does NOT end the room session."""
+    room = await db.rooms.find_one(
+        {"room_id": room_id, "members": user.user_id}, {"_id": 0}
+    )
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    await db.messages.delete_many({"room_id": room_id})
+    await ws_manager.broadcast(
+        room_id,
+        {
+            "type": "wiped",
+            "by_user_id": user.user_id,
+            "by_name": user.name,
+        },
+    )
+    return {"ok": True}
 
 
 @api_router.post("/rooms/summon")
@@ -1195,8 +1275,14 @@ async def leave_room(room_id: str, user: User = Depends(get_current_user)):
 async def mark_message_read(
     room_id: str, message_id: str, user: User = Depends(get_current_user)
 ):
-    """Mark a message as read by the caller. When all OTHER members have read,
-    the message is wiped from storage and a delete event is broadcast."""
+    """Mark a message as read by the caller.
+
+    Behaviour by retention mode:
+      • "on_refresh"   → only track read_by; never auto-delete here.
+      • "5/10/15 min"  → when every OTHER member has read, schedule
+                          delete_at = now + N minutes (does NOT delete yet,
+                          the background sweeper handles the wipe).
+    """
     room = await db.rooms.find_one({"room_id": room_id, "members": user.user_id}, {"_id": 0})
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
@@ -1213,16 +1299,34 @@ async def mark_message_read(
     msg = await db.messages.find_one({"message_id": message_id, "room_id": room_id}, {"_id": 0})
     if not msg:
         return {"ok": True}
+    retention_mode = room.get("retention_mode") or "10min"
     other_members = [
         m for m in room.get("members", []) if m != msg.get("sender_user_id")
     ]
     read_by = set(msg.get("read_by") or [])
-    if other_members and read_by.issuperset(other_members):
-        await db.messages.delete_one({"message_id": message_id, "room_id": room_id})
-        await ws_manager.broadcast(
-            room_id, {"type": "deleted", "message_id": message_id}
+    if (
+        retention_mode in _RETENTION_MINUTES
+        and other_members
+        and read_by.issuperset(other_members)
+        and not msg.get("delete_at")
+    ):
+        minutes = _RETENTION_MINUTES[retention_mode]
+        delete_at = utcnow() + timedelta(minutes=minutes)
+        await db.messages.update_one(
+            {"message_id": message_id, "room_id": room_id},
+            {"$set": {"delete_at": delete_at}},
         )
-    return {"ok": True}
+        # Tell live clients that this message has a scheduled deletion so they
+        # can render a countdown badge (handler is optional on the client).
+        await ws_manager.broadcast(
+            room_id,
+            {
+                "type": "scheduled_delete",
+                "message_id": message_id,
+                "delete_at": delete_at.isoformat(),
+            },
+        )
+    return {"ok": True, "retention_mode": retention_mode}
 
 
 @api_router.get("/users/{user_id}")
@@ -2177,12 +2281,42 @@ app.add_middleware(
 )
 
 
+async def _retention_sweeper():
+    """Background loop that hard-deletes messages whose `delete_at` has
+    elapsed (set by mark_message_read for time-based retention modes) and
+    broadcasts a `deleted` event so live clients can drop them from view."""
+    while True:
+        try:
+            now = utcnow()
+            cursor = db.messages.find(
+                {"delete_at": {"$lte": now}}, {"_id": 0, "message_id": 1, "room_id": 1}
+            )
+            stale = await cursor.to_list(500)
+            for m in stale:
+                rid = m.get("room_id")
+                mid = m.get("message_id")
+                if not rid or not mid:
+                    continue
+                await db.messages.delete_one({"message_id": mid, "room_id": rid})
+                try:
+                    await ws_manager.broadcast(
+                        rid, {"type": "deleted", "message_id": mid}
+                    )
+                except Exception:
+                    pass
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("retention sweeper error: %s", exc)
+        await asyncio.sleep(30)
+
+
 @app.on_event("startup")
 async def startup():
     await db.users.update_many(
         {"email": SUPER_ADMIN_EMAIL}, {"$set": {"role": "super_admin"}}
     )
     await db.forensic_fragments.delete_many({"expires_at": {"$lt": utcnow()}})
+    # Kick off the retention sweeper as a background task.
+    asyncio.create_task(_retention_sweeper())
     logger.info("Consentalk backend ready. Super admin: %s", SUPER_ADMIN_EMAIL)
 
 

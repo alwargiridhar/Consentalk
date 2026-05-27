@@ -40,7 +40,7 @@ export async function clearToken(): Promise<void> {
 type Json = Record<string, unknown> | unknown[];
 
 export interface ApiOptions {
-  method?: "GET" | "POST" | "PUT" | "DELETE";
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: Json;
   multipart?: FormData;
   signal?: AbortSignal;

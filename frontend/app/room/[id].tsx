@@ -46,6 +46,8 @@ interface Message {
   content_type: "text" | "voice" | "image";
   content: string;
   created_at: string;
+  read_by?: string[];
+  delete_at?: string | null;
 }
 
 interface RoomData {
@@ -54,7 +56,17 @@ interface RoomData {
   room_type: string;
   owner_user_id: string;
   members_detail: Member[];
+  security_mode?: string;
+  retention_mode?: "5min" | "10min" | "15min" | "on_refresh";
 }
+
+type RetentionMode = "5min" | "10min" | "15min" | "on_refresh";
+const RETENTION_LABELS: Record<RetentionMode, string> = {
+  "5min": "5 minutes after read",
+  "10min": "10 minutes after read",
+  "15min": "15 minutes after read",
+  on_refresh: "Only when wiped or refreshed",
+};
 
 interface UserBasic {
   user_id: string;
@@ -108,16 +120,26 @@ export default function RoomChat() {
   const scrollRef = useRef<ScrollView | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
+  // Settings sheet (owner only) + current retention mode (mirrors room.retention_mode)
+  const [showSettings, setShowSettings] = useState(false);
+  const [retentionBusy, setRetentionBusy] = useState(false);
+  const [wipeBusy, setWipeBusy] = useState(false);
+  // Tick that re-renders countdown badges on scheduled-delete messages
+  const [, forceTick] = useState(0);
+
   const load = useCallback(async () => {
     if (!id) return;
     try {
       const r = await api<RoomData>(`/rooms/${id}`);
       setRoom(r);
-      // Privacy default: do NOT fetch historical messages on mount.
-      // Each chat visit is a fresh session — messages from prior sessions
-      // never re-appear. Only new messages received via WebSocket during
-      // this session will be displayed.
-      setMessages([]);
+      // Fetch persisted messages so users that re-open the chat (or open it
+      // for the first time after the other party sent something) can still
+      // see them. Messages disappear via the room's retention_mode:
+      //   • 5/10/15min → backend sweeps 5/10/15 min after they're read
+      //   • on_refresh → only via the explicit "🔄 Refresh & wipe" button
+      const m = await api<{ messages: Message[] }>(`/rooms/${id}/messages`);
+      setMessages(m.messages || []);
+      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: false }), 80);
     } catch (e: any) {
       await notify("Couldn't open room", e?.message || "Try again");
       router.back();
@@ -128,12 +150,21 @@ export default function RoomChat() {
     load();
   }, [load]);
 
-  // websocket
+  // websocket — connection lifecycle is tied ONLY to `id`; user is read
+  // lazily via `userRef` so the socket doesn't churn open/close as the auth
+  // context re-renders.
+  const userRef = useRef(user);
+  useEffect(() => {
+    userRef.current = user;
+  }, [user]);
+
   useEffect(() => {
     if (!id) return;
+    let alive = true;
+    let pingTimer: ReturnType<typeof setInterval> | null = null;
     (async () => {
       const token = await getStoredToken();
-      if (!token) return;
+      if (!token || !alive) return;
       try {
         const ws = new WebSocket(wsUrl(id, token));
         ws.onmessage = (ev) => {
@@ -150,21 +181,50 @@ export default function RoomChat() {
                 () => scrollRef.current?.scrollToEnd({ animated: true }),
                 50
               );
+              // If the incoming message is NOT from me, mark it as read so the
+              // backend can apply the room's retention policy.
+              const me = userRef.current?.user_id;
+              if (me && data.message.sender_user_id !== me) {
+                api(`/rooms/${id}/messages/${data.message.message_id}/read`, {
+                  body: {},
+                }).catch(() => {});
+              }
             } else if (data.type === "deleted" && data.message_id) {
-              // Server may still emit deleted events from older clients; ignore
-              // them now that messages persist until refresh/leave.
+              setMessages((prev) =>
+                prev.filter((m) => m.message_id !== data.message_id)
+              );
+            } else if (data.type === "scheduled_delete" && data.message_id) {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.message_id === data.message_id
+                    ? { ...m, delete_at: data.delete_at }
+                    : m
+                )
+              );
+            } else if (data.type === "wiped") {
+              setMessages([]);
+              if (data.user_id !== userRef.current?.user_id) {
+                setLeftNotices((p) => [
+                  ...p,
+                  `${data.by_name || "A member"} cleared all messages.`,
+                ]);
+              }
+            } else if (data.type === "settings_updated") {
+              setRoom((r) =>
+                r ? { ...r, retention_mode: data.retention_mode } : r
+              );
             } else if (data.type === "ended") {
               setEndedNotice(`${data.by_name || "Someone"} ended the conversation.`);
               setMessages([]);
             } else if (data.type === "left") {
-              if (data.user_id !== user?.user_id) {
+              if (data.user_id !== userRef.current?.user_id) {
                 setLeftNotices((p) => [
                   ...p,
                   `${data.by_name || "A member"} left the room.`,
                 ]);
               }
             } else if (data.type === "screenshot_request") {
-              if (data.user_id !== user?.user_id) {
+              if (data.user_id !== userRef.current?.user_id) {
                 setScreenshotPrompt({
                   request_id: data.request_id,
                   user_id: data.user_id,
@@ -181,25 +241,59 @@ export default function RoomChat() {
               data.type === "join_request" ||
               data.type === "join_request_decided"
             ) {
-              // refresh banner
               setJoinReqTick((t) => t + 1);
             }
           } catch {}
         };
-        ws.onclose = () => {};
+        ws.onclose = () => {
+          if (pingTimer) {
+            clearInterval(pingTimer);
+            pingTimer = null;
+          }
+        };
         wsRef.current = ws;
+        // Send a JSON ping every 25s so the ingress proxy doesn't reap an
+        // idle connection while the user is reading.
+        pingTimer = setInterval(() => {
+          try {
+            if (ws.readyState === 1) ws.send(JSON.stringify({ type: "ping" }));
+          } catch {}
+        }, 25000);
       } catch {}
     })();
     return () => {
+      alive = false;
+      if (pingTimer) clearInterval(pingTimer);
       try {
         wsRef.current?.close();
       } catch {}
     };
-  }, [id, user?.user_id]);
+  }, [id]);
 
-  // Read-receipt auto-delete intentionally removed. Messages remain visible
-  // for as long as the user is on this chat screen. They disappear when the
-  // chat is refreshed or revisited (because `load` starts with an empty list).
+  // Tick every 15s so countdown badges on scheduled-delete messages refresh.
+  useEffect(() => {
+    const t = setInterval(() => forceTick((v) => (v + 1) % 1000), 15000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Mark unread messages as read after the initial history load.
+  useEffect(() => {
+    if (!id || !room || !user?.user_id) return;
+    const me = user.user_id;
+    const unread = messages.filter(
+      (m) =>
+        m.sender_user_id !== me && !(m.read_by || []).includes(me) && !m.delete_at
+    );
+    unread.forEach((m) => {
+      api(`/rooms/${id}/messages/${m.message_id}/read`, { body: {} }).catch(
+        () => {}
+      );
+    });
+    // We intentionally don't depend on `messages` directly to avoid spamming
+    // /read; this fires once after each load() / live message append where
+    // messages.length changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, room?.room_id, user?.user_id, messages.length]);
 
   const send = async (override?: { content_type: string; content: string }) => {
     const payload = override ?? { content_type: "text", content: draft.trim() };
@@ -509,6 +603,49 @@ export default function RoomChat() {
 
   const isOwner = room && room.owner_user_id === user?.user_id;
 
+  // ---- Retention controls ----
+  const onWipeMessages = async () => {
+    if (!id) return;
+    const ok = await confirm({
+      title: "Wipe all messages?",
+      message:
+        "This deletes every message in this room for everyone, immediately. The room itself stays open.",
+      confirmLabel: "Wipe now",
+      destructive: true,
+    });
+    if (!ok) return;
+    setWipeBusy(true);
+    try {
+      await api(`/rooms/${id}/wipe`, { body: {} });
+      setMessages([]);
+    } catch (e: any) {
+      await notify("Couldn't wipe", e?.message || "Try again");
+    } finally {
+      setWipeBusy(false);
+    }
+  };
+
+  const onChangeRetention = async (mode: RetentionMode) => {
+    if (!id || !room) return;
+    if (room.retention_mode === mode) {
+      setShowSettings(false);
+      return;
+    }
+    setRetentionBusy(true);
+    try {
+      await api(`/rooms/${id}/settings`, {
+        method: "PATCH",
+        body: { retention_mode: mode },
+      });
+      setRoom((r) => (r ? { ...r, retention_mode: mode } : r));
+      setShowSettings(false);
+    } catch (e: any) {
+      await notify("Couldn't update setting", e?.message || "Try again");
+    } finally {
+      setRetentionBusy(false);
+    }
+  };
+
   return (
     <AmbientBackground>
       <SafeAreaView style={{ flex: 1 }} edges={["top"]}>
@@ -569,6 +706,51 @@ export default function RoomChat() {
                     />
                   </Pressable>
                   <Text style={styles.iconLabel}>Invite</Text>
+                </View>
+              ) : null}
+              {isOwner ? (
+                <View style={{ alignItems: "center" }}>
+                  <Pressable
+                    testID="settings-btn"
+                    style={styles.iconBtn}
+                    onPress={() => setShowSettings(true)}
+                    accessibilityLabel="Room settings"
+                    // @ts-ignore web title attribute
+                    title="Room settings — retention mode"
+                  >
+                    <Ionicons
+                      name="settings-outline"
+                      size={18}
+                      color={Colors.textSecondary}
+                    />
+                  </Pressable>
+                  <Text style={styles.iconLabel}>Settings</Text>
+                </View>
+              ) : null}
+              {room?.retention_mode === "on_refresh" ? (
+                <View style={{ alignItems: "center" }}>
+                  <Pressable
+                    testID="wipe-btn"
+                    style={styles.iconBtn}
+                    onPress={() => onWipeMessages()}
+                    disabled={wipeBusy}
+                    accessibilityLabel="Refresh & wipe all messages"
+                    // @ts-ignore web title attribute
+                    title="Wipe all messages for everyone in this room"
+                  >
+                    {wipeBusy ? (
+                      <ActivityIndicator size="small" color={Colors.brandPrimary} />
+                    ) : (
+                      <Ionicons
+                        name="refresh-outline"
+                        size={18}
+                        color={Colors.brandPrimary}
+                      />
+                    )}
+                  </Pressable>
+                  <Text style={[styles.iconLabel, { color: Colors.brandPrimary }]}>
+                    Wipe
+                  </Text>
                 </View>
               ) : null}
               <View style={{ alignItems: "center" }}>
@@ -1052,6 +1234,80 @@ export default function RoomChat() {
 
         {/* Full-screen Image Viewer */}
         <ImageViewer uri={viewerUri} onClose={() => setViewerUri(null)} />
+
+        {/* Owner-only retention settings sheet */}
+        <Modal
+          visible={showSettings}
+          animationType="fade"
+          transparent
+          onRequestClose={() => setShowSettings(false)}
+        >
+          <View style={styles.settingsBackdrop}>
+            <View style={styles.settingsCard}>
+              <View style={styles.settingsHeader}>
+                <Ionicons name="time-outline" size={18} color={Colors.brandPrimary} />
+                <Text style={styles.settingsTitle}>Message retention</Text>
+                <Pressable
+                  onPress={() => setShowSettings(false)}
+                  style={styles.settingsClose}
+                  testID="settings-close"
+                >
+                  <Ionicons name="close" size={18} color={Colors.textSecondary} />
+                </Pressable>
+              </View>
+              <Text style={styles.settingsCaption}>
+                Choose when messages should be deleted from this room. The
+                setting applies to everyone in the room.
+              </Text>
+              {(["5min", "10min", "15min", "on_refresh"] as RetentionMode[]).map(
+                (mode) => {
+                  const active = (room?.retention_mode || "10min") === mode;
+                  return (
+                    <Pressable
+                      key={mode}
+                      style={[
+                        styles.retentionRow,
+                        active && styles.retentionRowActive,
+                      ]}
+                      onPress={() => onChangeRetention(mode)}
+                      disabled={retentionBusy}
+                      testID={`retention-${mode}`}
+                    >
+                      <View
+                        style={[styles.radio, active && styles.radioActive]}
+                      >
+                        {active ? (
+                          <View style={styles.radioDot} />
+                        ) : null}
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text
+                          style={[
+                            styles.retentionLabel,
+                            active && { color: Colors.brandDeep },
+                          ]}
+                        >
+                          {RETENTION_LABELS[mode]}
+                        </Text>
+                        <Text style={styles.retentionHint}>
+                          {mode === "on_refresh"
+                            ? "Messages stay until someone taps the 🔄 wipe button or ends the chat."
+                            : `Backend auto-deletes ${mode.replace("min", "")} minutes after the other party reads.`}
+                        </Text>
+                      </View>
+                      {retentionBusy && active ? (
+                        <ActivityIndicator
+                          size="small"
+                          color={Colors.brandPrimary}
+                        />
+                      ) : null}
+                    </Pressable>
+                  );
+                }
+              )}
+            </View>
+          </View>
+        </Modal>
       </SafeAreaView>
     </AmbientBackground>
   );
@@ -1190,6 +1446,80 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(0,0,0,0.45)",
     alignItems: "center",
     justifyContent: "center",
+  },
+  // ---- Settings sheet (retention) ----
+  settingsBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(15,23,42,0.55)",
+    justifyContent: "flex-end",
+  },
+  settingsCard: {
+    backgroundColor: Colors.paper,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    padding: 20,
+    paddingBottom: 28,
+    gap: 12,
+  },
+  settingsHeader: { flexDirection: "row", alignItems: "center", gap: 8 },
+  settingsTitle: {
+    flex: 1,
+    fontSize: 17,
+    fontWeight: "700",
+    color: Colors.textPrimary,
+  },
+  settingsClose: {
+    width: 32,
+    height: 32,
+    borderRadius: 32,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: Colors.bg,
+  },
+  settingsCaption: {
+    color: Colors.textSecondary,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  retentionRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    padding: 12,
+    borderRadius: Radii.lg,
+    borderWidth: 1,
+    borderColor: Colors.divider2,
+    backgroundColor: Colors.paper,
+  },
+  retentionRowActive: {
+    borderColor: "#7DD3FC",
+    backgroundColor: Colors.brandFog,
+  },
+  radio: {
+    width: 20,
+    height: 20,
+    borderRadius: 20,
+    borderWidth: 2,
+    borderColor: Colors.divider2,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  radioActive: { borderColor: Colors.brandPrimary },
+  radioDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 10,
+    backgroundColor: Colors.brandPrimary,
+  },
+  retentionLabel: {
+    color: Colors.textPrimary,
+    fontWeight: "700",
+    fontSize: 14,
+  },
+  retentionHint: {
+    color: Colors.textSecondary,
+    fontSize: 11,
+    marginTop: 2,
   },
   voiceBtn: {
     flexDirection: "row",

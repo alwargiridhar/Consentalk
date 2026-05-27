@@ -1,0 +1,45 @@
+{
+  "summary": "Iteration 9 (retention dropdown + history-on-mount + wipe + sweeper) verified end-to-end. Backend: 17/17 new tests pass in /app/backend/tests/test_iteration9_retention.py — including the primary bug fix (3 messages persist for an offline reader and are returned by GET /api/rooms/{id}/messages on reconnect), POST /rooms/create accepting retention_mode with 10min default + invalid->10min fallback, PATCH /rooms/{id}/settings owner-only (403 for non-owner, 400 on invalid mode), POST /rooms/{id}/wipe by any member (404 for non-member), mark-message-read schedules delete_at for 5/10/15min within ±30s but does NOT set delete_at for on_refresh, and the background _retention_sweeper deletes past-due messages within ~30s. Regression: all 16 prior tests in test_iteration7_features.py + test_iteration8_features.py still pass. Frontend (mobile viewport): /room/{id} shows testID='settings-btn' only for owner, the modal exposes all four retention-5min/10min/15min/on_refresh radios, selecting on_refresh broadcasts settings_updated and makes testID='wipe-btn' appear immediately, a pre-seeded on_refresh room shows wipe-btn from the start, and /room/create review step (step 4 of 4) exposes the same four retention testIDs plus testID='create-room-submit'. The WS handler in app/room/[id].tsx correctly handles 'wiped', 'scheduled_delete', 'settings_updated' and 'deleted' (re-enabled) events; load() now fetches /rooms/{id}/messages on mount; the WS effect only depends on id and runs a 25s JSON ping. Deprecated package warning persists (expo-av).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": [
+      {"component": "expo-av", "issue": "Deprecated package still imported (warning fires on every screen load). Migrate to expo-audio + expo-video before SDK 54. Reference: /app/frontend/app/(tabs)/index.tsx:15"}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration9_retention.py",
+    "/app/test_reports/pytest/iter9_results.xml",
+    "/tmp/seed_iter9_ui.py",
+    "/tmp/iter9_room10min.png",
+    "/tmp/iter9_settings_modal.png",
+    "/tmp/iter9_after_switch.png",
+    "/tmp/iter9_onrefresh_room.png",
+    "/tmp/iter9_review.png",
+    "/tmp/iter9_review_onrefresh.png"
+  ],
+  "action_items": [
+    "(Optional) Migrate expo-av usage in /app/frontend/app/(tabs)/index.tsx to expo-audio (recording) + expo-video (playback) — deprecation warning fires on every screen load and the package is removed in SDK 54.",
+    "(Optional) Switch Metro out of CI mode so frontend code changes hot-reload without `sudo supervisorctl restart expo`."
+  ],
+  "critical_code_review_comments": [
+    "load() in /app/frontend/app/room/[id].tsx fetches /rooms/{id}/messages on mount (line 140) — primary bug fix verified.",
+    "WS effect depends only on `id` and reads the auth user lazily via userRef (lines 153-161) — no more open/close churn.",
+    "25s keepalive ping is wired correctly (lines 255-261) and cleared on cleanup.",
+    "Server-side _retention_sweeper runs every 30s, deletes by message_id+room_id, broadcasts 'deleted' (server.py:2284-2309). Schedule is idempotent (cond `and not msg.get('delete_at')`).",
+    "POST /api/rooms/{id}/wipe correctly requires membership (404 for non-members) and broadcasts {type:'wiped',by_user_id,by_name}.",
+    "PATCH /api/rooms/{id}/settings enforces owner-only (403 for non-owner) and rejects invalid modes (400).",
+    "Frontend WS handler covers all four iter-9 event types: wiped, scheduled_delete, settings_updated, deleted."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration9_retention.py (new)"
+  ],
+  "success_rate": {"backend": "100% (17/17 iter9 + 16/16 iter7+8 regression)", "frontend": "100% (settings modal, wipe visibility toggle, on_refresh seeded room, create-review retention picker all verified on 390x844 mobile viewport)"},
+  "seed_data_creation": "Seeded test user user_6099eedc68dd with session test_sess_ad383764d97d4ac9, plus a 10min duo room (room_cc6a6500a26b) and an on_refresh duo room (room_e6106482d653) via /tmp/seed_iter9_ui.py. All seed data cleaned up at end of run (1 user + 1 session + 2 rooms deleted).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Iteration 9 backend tests live at /app/backend/tests/test_iteration9_retention.py and cover history-on-mount, create_room retention, PATCH settings (owner-only), POST wipe, mark-read scheduling for all 4 modes, and the background sweeper (manually inserts a past-due delete_at then polls for up to 40s). The sweeper test is necessarily slow (~30s) — keep it in the iter9 file so regressions stay fast. Frontend tests require: (a) seed a user + session via mongo direct insert, (b) page.goto('/'), evaluate localStorage.setItem('consentalk.session_token', TOKEN), then navigate to the target route. Metro is still in CI mode — restart expo after any frontend code change.",
+  "rca_of_issue": "The 'messages sent but not received' bug had two causes — (1) chat screen reset messages to [] on mount without ever fetching the persisted history, so an offline reader returning to the room saw an empty pane; (2) the WS effect depended on user?.user_id and reconnected on every auth-context re-render, which the backend logged as open/close churn. Fix in /app/frontend/app/room/[id].tsx: load() now does both GET /rooms/{id} and GET /rooms/{id}/messages on mount (line 140), the WS useEffect depends only on `id` and reads `user` lazily via userRef (lines 153-161), and a 25s JSON ping keeps the ingress proxy from reaping the socket (lines 255-261). Both backend pytest (test_history_returned_for_late_reader) and the frontend room screen behavior confirm the fix."
+}

@@ -103,6 +103,124 @@
 #====================================================================================================
 
 user_problem_statement: |
+  Iteration 9 — CRITICAL BUG FIX + new retention-mode setting.
+
+  Bug reported by user (screenshots attached): "messages are being sent, but not received on the other end".
+  Root cause: the chat screen was clearing the messages array to [] on every mount and never fetching
+  history from the backend. So if user B opened the chat *after* user A had sent messages, those
+  messages were lost — only live WebSocket pushes received while both were simultaneously online
+  could deliver content. WS effect also re-mounted on every change of `user?.user_id` which churned
+  the connection open/close (visible in backend logs).
+
+  New feature: dropdown to choose when messages are deleted —
+      • 5 min after read
+      • 10 min after read (default)
+      • 15 min after read
+      • Only on refresh / wipe
+
+backend:
+  - task: "Retention mode field on rooms + PATCH /rooms/{room_id}/settings"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "CreateRoomInput / Room schema now accepts retention_mode in {'5min','10min','15min','on_refresh'} (default '10min'). PATCH /rooms/{id}/settings is owner-only and broadcasts a 'settings_updated' WS event."
+  - task: "Retention-aware mark_message_read + background sweeper"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "mark_message_read no longer hard-deletes on duo rooms. For 5/10/15min modes it sets delete_at = now+N min once every OTHER member has read; a 30 s background asyncio task sweeps expired delete_at rows and broadcasts {'type':'deleted'} so live clients drop them. For 'on_refresh' mode it only tracks read_by — messages live until someone hits /wipe."
+  - task: "POST /rooms/{room_id}/wipe — manual refresh & wipe"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Any member can wipe all messages in the room. Broadcasts {'type':'wiped'} so live clients clear their local state."
+
+frontend:
+  - task: "Load message history on mount (FIXES THE 'not received' BUG)"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/room/[id].tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "load() now calls GET /rooms/{id}/messages instead of setMessages([]). Combined with the new persistence policy this fully fixes the user-reported 'sent but not received' delivery bug."
+  - task: "Stabilized WebSocket effect + keepalive ping + read receipts"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/room/[id].tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "WS useEffect now depends only on [id] (was [id, user?.user_id], which caused open/close churn). userRef is used inside the handler for late-binding identity. Added 25 s JSON {type:'ping'} keepalive. Re-enabled 'deleted' handler. New 'scheduled_delete', 'wiped', 'settings_updated' handlers. Incoming messages from others are auto-marked read so the backend can apply retention."
+  - task: "Retention settings sheet (owner only) + 🔄 wipe button + create-room dropdown"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/room/[id].tsx & app/room/create.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Room header: 'Settings' button (testID='settings-btn') opens a retention picker modal (testID='retention-5min'/'retention-10min'/'retention-15min'/'retention-on_refresh'). When mode=on_refresh, a 'Wipe' button (testID='wipe-btn') appears next to End. Create flow review step lets the user pick retention before creating the room."
+  - task: "api.ts — PATCH method"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/lib/api.ts"
+    stuck_count: 0
+    priority: "low"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Added PATCH to ApiOptions.method enum."
+
+metadata:
+  created_by: "main_agent"
+  version: "9.0"
+  test_sequence: 7
+  run_ui: false
+
+test_plan:
+  current_focus:
+    - "Load message history on mount (FIXES THE 'not received' BUG)"
+    - "Stabilized WebSocket effect + keepalive ping + read receipts"
+    - "Retention-aware mark_message_read + background sweeper"
+    - "POST /rooms/{room_id}/wipe — manual refresh & wipe"
+    - "Retention settings sheet (owner only) + 🔄 wipe button + create-room dropdown"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: "PLEASE test the message-delivery fix end-to-end (B opens chat AFTER A sent → B sees the messages). Then exercise each retention mode: 5min/10min/15min should schedule delete_at and the sweeper should remove the message; on_refresh should keep messages until the /wipe endpoint is called (broadcasts 'wiped'). Pre-existing iter-7/iter-8 features must still pass (no regression)."
+
+user_problem_statement: |
   Iteration 8 — Smart-keypad summon + re-summon-on-exit:
   1. After typing/speaking the phrase the keypad should be SKIPPED automatically when the room
      creator did NOT set a PIN (Light mode). Only Deep-mode rooms (creator added a PIN) should

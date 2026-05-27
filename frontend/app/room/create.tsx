@@ -25,6 +25,13 @@ import { startWebRecorder, blobFilename, WebRecorder } from "../../src/lib/webRe
 type Step = "name" | "phrase" | "mode" | "pin" | "type" | "review";
 type RoomType = "duo" | "circle";
 type SecurityMode = "light" | "deep";
+type RetentionMode = "5min" | "10min" | "15min" | "on_refresh";
+const RETENTION_LABELS: Record<RetentionMode, string> = {
+  "5min": "5 minutes after read",
+  "10min": "10 minutes after read",
+  "15min": "15 minutes after read",
+  on_refresh: "Only when wiped or refreshed",
+};
 
 export default function CreateRoom() {
   const router = useRouter();
@@ -35,6 +42,7 @@ export default function CreateRoom() {
   const [pin, setPin] = useState("");
   const [roomType, setRoomType] = useState<RoomType>("duo");
   const [securityMode, setSecurityMode] = useState<SecurityMode>("light");
+  const [retentionMode, setRetentionMode] = useState<RetentionMode>("10min");
   const [busy, setBusy] = useState(false);
   const [recording, setRecording] = useState<Audio.Recording | null>(null);
   const webRecRef = useRef<WebRecorder | null>(null);
@@ -76,6 +84,7 @@ export default function CreateRoom() {
         phrase,
         room_type: roomType,
         security_mode: securityMode,
+        retention_mode: retentionMode,
       };
       if (securityMode === "deep") body.pin = pin;
       const r = await api<{ room_id: string; name: string }>("/rooms/create", {
@@ -480,6 +489,60 @@ export default function CreateRoom() {
                     {roomType === "duo" ? "Duo" : "Circle"}
                   </Text>
                 </View>
+                <View style={styles.reviewRow}>
+                  <Text style={styles.reviewLabel}>Retention</Text>
+                  <Text style={styles.reviewValue}>
+                    {RETENTION_LABELS[retentionMode]}
+                  </Text>
+                </View>
+
+                <View style={{ marginTop: 8, gap: 8 }}>
+                  <Text style={styles.cardHint}>Change retention if you want:</Text>
+                  {(["5min", "10min", "15min", "on_refresh"] as RetentionMode[]).map(
+                    (m) => {
+                      const active = retentionMode === m;
+                      return (
+                        <Pressable
+                          key={m}
+                          onPress={() => setRetentionMode(m)}
+                          style={[
+                            styles.roomTypeCard,
+                            active && styles.roomTypeCardActive,
+                          ]}
+                          testID={`retention-${m}`}
+                        >
+                          <View style={styles.roomTypeIcon}>
+                            <Ionicons
+                              name={
+                                m === "on_refresh"
+                                  ? "refresh-outline"
+                                  : "time-outline"
+                              }
+                              size={20}
+                              color={Colors.brandPrimary}
+                            />
+                          </View>
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.roomTypeTitle}>
+                              {RETENTION_LABELS[m]}
+                            </Text>
+                            <Text style={styles.roomTypeText}>
+                              {m === "on_refresh"
+                                ? "Messages stay until anyone taps the 🔄 wipe button."
+                                : `Auto-deleted ${m.replace("min", "")} min after the other person reads.`}
+                            </Text>
+                          </View>
+                          <Ionicons
+                            name={active ? "radio-button-on" : "radio-button-off"}
+                            color={active ? Colors.brandPrimary : Colors.textTertiary}
+                            size={22}
+                          />
+                        </Pressable>
+                      );
+                    }
+                  )}
+                </View>
+
                 <Text style={[styles.cardHint, { marginTop: 12 }]}>
                   Phrase{securityMode === "deep" ? " and PIN are" : " is"} stored as one-way hash{securityMode === "deep" ? "es" : ""}. We can't recover them.
                 </Text>
