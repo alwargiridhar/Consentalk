@@ -58,7 +58,8 @@
           "photosPermission": "Share an ephemeral photo with a trusted member"
         }
       ],
-      "expo-secure-store"
+      "expo-secure-store",
+      "expo-font"
     ],
     "experiments": {
       "typedRoutes": true
