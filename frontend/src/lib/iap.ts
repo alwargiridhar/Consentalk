@@ -65,23 +65,28 @@ export async function purchaseSubscription(productId: ProductId): Promise<{
   premium_until?: string;
   reason?: string;
 }> {
-  if (!NATIVE) {
-    // Web fallback: hit the mocked backend subscribe endpoint
+  // Helper used by both the web fallback and the native-SDK-missing path.
+  const callBackendSubscribe = async () => {
     try {
       const planId =
         productId === "presence_monthly" ? "monthly_inr" : "yearly_inr";
       const r = await api<{ premium_until: string }>("/billing/subscribe", {
         body: { plan_id: planId },
       });
-      return { ok: true, premium_until: r.premium_until };
+      return { ok: true, premium_until: r.premium_until } as const;
     } catch (e: any) {
-      return { ok: false, reason: e?.message || "Subscribe failed" };
+      return { ok: false, reason: e?.message || "Subscribe failed" } as const;
     }
-  }
+  };
+
+  if (!NATIVE) return callBackendSubscribe();
+
   const sdk = await getSdk();
-  if (!sdk?.requestSubscription) {
-    return { ok: false, reason: "Billing not available on this device" };
-  }
+  // If `react-native-iap` is not bundled (e.g. removed to keep the AAB build
+  // green while the Play Store package name is being unlocked), fall back to
+  // the backend subscribe endpoint so the in-app flow keeps working.
+  if (!sdk?.requestSubscription) return callBackendSubscribe();
+
   try {
     const purchase: any = await sdk.requestSubscription({ sku: productId });
     if (!purchase) {
