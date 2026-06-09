@@ -1155,19 +1155,31 @@ async def get_room(room_id: str, user: User = Depends(get_current_user)):
     )
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
+    # Single bulk lookup for all members in this room (was an N+1 loop).
+    member_ids = room.get("members", []) or []
+    users_by_id: Dict[str, Dict[str, Any]] = {}
+    if member_ids:
+        cursor = db.users.find(
+            {"user_id": {"$in": member_ids}},
+            {"_id": 0, "verification_data": 0},
+        )
+        for u in await cursor.to_list(length=len(member_ids)):
+            users_by_id[u["user_id"]] = u
     members = []
-    for uid in room.get("members", []):
-        u = await db.users.find_one({"user_id": uid}, {"_id": 0, "verification_data": 0})
-        if u:
-            members.append(
-                {
-                    "user_id": u["user_id"],
-                    "name": u.get("name"),
-                    "picture": u.get("picture"),
-                    "verified": u.get("verified", False),
-                    "is_owner": uid == room.get("owner_user_id"),
-                }
-            )
+    owner_id = room.get("owner_user_id")
+    for uid in member_ids:
+        u = users_by_id.get(uid)
+        if not u:
+            continue
+        members.append(
+            {
+                "user_id": u["user_id"],
+                "name": u.get("name"),
+                "picture": u.get("picture"),
+                "verified": u.get("verified", False),
+                "is_owner": uid == owner_id,
+            }
+        )
     room["members_detail"] = members
     return room
 
