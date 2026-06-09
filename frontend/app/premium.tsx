@@ -212,7 +212,7 @@ export default function PremiumScreen() {
 
   return (
     <AmbientBackground>
-      <SafeAreaView style={{ flex: 1 }} edges={["top"]}>
+      <SafeAreaView style={{ flex: 1 }} edges={["top", "bottom"]}>
         <View style={styles.header}>
           <Pressable onPress={() => router.back()} style={styles.backBtn}>
             <Ionicons name="chevron-back" size={20} color={Colors.textSecondary} />
